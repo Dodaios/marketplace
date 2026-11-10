@@ -1,23 +1,26 @@
-# Personal Jarvis Marketplace
+# Dodaios Marketplace
 
-The community registry for [Personal Jarvis](https://github.com/PersonalJarvis/PersonalJarvis)
+The community registry for [Dodaios](https://github.com/Dodaios/Dodaios)
 plugins, skills and **agent templates**. Anyone can publish; every submission
 that passes the automated checks is listed — there is no human review queue.
-Users see a "Community · not reviewed" badge and an explicit consent dialog in
-the app before anything is installed.
+Every entry's page shows what it reaches and every published file before
+anything is installed.
 
-- **Browse:** in the app under **Plugins → Community**.
-- **Publish from the app:** open an agent, press **Share**, sign in with
-  GitHub and press **Publish**. The app files the submission as an issue on
-  this repository under your account; the checks run and publish it within a
+- **Browse:** on the web at <https://dodaios.ai/marketplace/>, or in the app
+  under **Marketplace**. Both show the same feed.
+- **Publish from the app:** open **Marketplace**, press **Publish yours**,
+  sign in with GitHub and add your package. To share an agent, open it and
+  press **Share**. The app files the submission as an issue on this
+  repository under your account; the checks run and publish it within a
   minute or two.
 - **Publish from the browser:** open a
   [Publish to the marketplace](../../issues/new?template=publish.yml) issue
   and paste the submission JSON. Same checks, same result.
 - **Publish with a pull request:** add one `submissions/<name>.json`
   (see [Submission format](#submission-format)).
-- **Feed:** the compiled [`index.json`](https://personaljarvis.github.io/marketplace/index.json)
-  is what the app reads.
+- **Feed:** the compiled [`index.json`](https://dodaios.github.io/marketplace/index.json)
+  is what the app reads. The storefront is rendered from the same file on
+  every publish (`scripts/build_site.py`), so the two cannot disagree.
 
 ## How publishing works
 
@@ -103,17 +106,17 @@ and the live examples in [`submissions/`](submissions/).
 
 The limits, patterns, reserved names and allowlists are generated from the
 validator into [`rules.json`](rules.json) and published at
-<https://personaljarvis.github.io/marketplace/rules.json>. Anything that
+<https://dodaios.github.io/marketplace/rules.json>. Anything that
 checks a submission before it reaches CI — the upload form, the app — reads
 that file instead of retyping the values, and CI fails if the two drift
 apart. `scripts/validate.py` stays the authority for the rules that are
 logic rather than data.
 
 **Plugin** (`kind: "plugin"`): an embedded Agent Plugins v1.0.0
-`plugin_json` (Jarvis specifics under the `io.github.personaljarvis`
+`plugin_json` (Dodaios specifics under the `io.github.personaljarvis`
 extension: auth mode, branding, category), an optional `mcp_json`
 (one `streamable-http` or pinned `stdio` server), an optional `skills`
-array, and an optional `usage_card` (keywords that help Jarvis offer the
+array, and an optional `usage_card` (keywords that help Dodaios offer the
 plugin on relevant turns). A package must carry at least one working
 component — an entry that only collects a token is refused.
 
@@ -121,14 +124,14 @@ component — an entry that only collects a token is refused.
 full `skill_md` (a `SKILL.md` with YAML frontmatter — the app validates it
 on install and shows it to the user before it can run).
 
-A skill does **not** have to be written for Personal Jarvis. The frontmatter
+A skill does **not** have to be written for Dodaios. The frontmatter
 only has to carry `name` and `description`; anything beyond that may be your
 agent's own vocabulary (`allowed-tools`, `model`, …). Such an entry is marked
 **portable**, and the store shows the open installer beside our own:
 
 ```
-jarvis marketplace install <name>              # Personal Jarvis
-npx skills add PersonalJarvis/marketplace --skill <name>   # any other agent
+dodaios marketplace install <name>                    # Dodaios
+npx skills add Dodaios/marketplace --skill <name>     # any other agent
 ```
 
 The mark is derived from your file — a SKILL.md using none of Jarvis' own
@@ -139,7 +142,7 @@ nothing to declare. Two optional fields override or enrich it:
 
 **Agent** (`kind: "agent"`): `title`, `description` (the one-paragraph
 summary on the store card), `categories`, and `agent` — the template of one
-Personal Jarvis agent:
+Dodaios agent:
 
 ```json
 "agent": {

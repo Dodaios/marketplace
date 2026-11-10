@@ -2,18 +2,18 @@
 """Compile the published registry into the static site the app consumes.
 
 Output (default ``_site/``):
-- ``index.json``  — the single feed Personal Jarvis fetches (community
-  plugins with embedded manifests, skills with raw download URLs, and agent
-  templates with the template embedded). The
-  storefront on personaljarvis.ai reads the SAME file client-side.
+- ``index.json``  — the single feed the Dodaios app fetches (community
+  plugins with embedded manifests, skills with their text and raw download
+  URLs, and agent templates with the template embedded).
 - ``rules.json``  — the generated submission rules, published so the upload
   endpoint and the app can read the limits instead of retyping them
   (scripts/export_rules.py).
-- ``index.html``  — a small redirect to the storefront for humans who open
-  the Pages URL directly.
+- the storefront — ``index.html``, one page per entry, ``publish/`` and
+  ``assets/``, rendered from that same feed by scripts/build_site.py and served
+  at dodaios.ai/marketplace.
 
-Keep the wire shape in sync with jarvis/marketplace/community_source.py
-(CommunityIndex / CommunityPluginEntry / CommunitySkillEntry /
+Keep the wire shape in sync with dodaios/marketplace/community_source.py in the
+app repository (CommunityIndex / CommunityPluginEntry / CommunitySkillEntry /
 CommunityAgentEntry).
 """
 
@@ -36,18 +36,10 @@ EXTENSION_DIR = "io.github.personaljarvis"
 # only have arrived before that limit existed.
 MAX_EMBED_BYTES = 131_072
 
-REPO = os.environ.get("GITHUB_REPOSITORY", "PersonalJarvis/marketplace")
+REPO = os.environ.get("GITHUB_REPOSITORY", "Dodaios/marketplace")
 BRANCH = "main"
 TREE_URL = f"https://github.com/{REPO}/tree/{BRANCH}"
 RAW_URL = f"https://raw.githubusercontent.com/{REPO}/{BRANCH}"
-STOREFRONT_URL = "https://personaljarvis.ai/marketplace"
-
-REDIRECT_HTML = f"""<!doctype html>
-<meta charset="utf-8">
-<meta http-equiv="refresh" content="0; url={STOREFRONT_URL}">
-<title>Personal Jarvis Marketplace</title>
-<p>The marketplace lives at <a href="{STOREFRONT_URL}">{STOREFRONT_URL}</a>.</p>
-"""
 
 
 # The two frontmatter profiles a published skill can carry. "jarvis" is the
@@ -103,6 +95,62 @@ def frontmatter_keys(skill_md: str) -> set[str]:
     if not sep:
         return set()
     return {m.group(1) for m in TOP_LEVEL_KEY_RE.finditer(block)}
+
+
+FRONTMATTER_RE = re.compile(r"\A\ufeff?---[ \t]*\r?\n(.*?)\r?\n---[ \t]*(?:\r?\n|\Z)", re.DOTALL)
+DESCRIPTION_KEY_RE = re.compile(r"^description[ \t]*:[ \t]*(.*)$")
+# What YAML writes after the colon when the value follows on the next lines.
+BLOCK_SCALAR_RE = re.compile(r"^[|>][+-]?\d*$")
+MAX_LISTED_DESCRIPTION = 280
+
+
+def frontmatter_description(skill_md: str) -> str:
+    """The ``description`` a SKILL.md states about itself, as one paragraph.
+
+    Stdlib only, so this reads the one key it needs instead of parsing YAML:
+    a plain or quoted value on the key's own line, or a block scalar
+    (``|``, ``>``, ``>-`` …) whose text is the indented lines that follow.
+    """
+    match = FRONTMATTER_RE.match(skill_md)
+    if match is None:
+        return ""
+    lines = match.group(1).splitlines()
+    for position, line in enumerate(lines):
+        key = DESCRIPTION_KEY_RE.match(line)
+        if key is None:
+            continue
+        value = key.group(1).strip()
+        parts = [] if BLOCK_SCALAR_RE.match(value) or not value else [value]
+        for continuation in lines[position + 1 :]:
+            if continuation.strip() and not continuation.startswith((" ", "\t")):
+                break  # the next top-level key
+            parts.append(continuation.strip())
+        text = " ".join(part for part in parts if part)
+        if len(text) >= 2 and text[0] == text[-1] and text[0] in "\"'":
+            text = text[1:-1]
+        return text.strip()
+    return ""
+
+
+def listed_description(submission: dict, skill_md: str) -> str:
+    """The text a skill is listed under.
+
+    The submission form's text, unless it says nothing. It has: a publisher
+    whose description was a YAML block scalar submitted the marker itself
+    (``"|"``), and the store listed the skill as "No description yet." while
+    the file beside it described it in full. The file is the fallback.
+    """
+    listed = str(submission.get("description") or "").strip()
+    if re.search(r"\w", listed):
+        return listed
+    derived = " ".join(frontmatter_description(skill_md).split())
+    if len(derived) <= MAX_LISTED_DESCRIPTION:
+        return derived
+    cut = derived[:MAX_LISTED_DESCRIPTION]
+    stop = max(cut.rfind(". "), cut.rfind("! "), cut.rfind("? "))
+    if stop >= MAX_LISTED_DESCRIPTION // 2:
+        return cut[: stop + 1]
+    return cut.rsplit(" ", 1)[0].rstrip(",;:") + "…"
 
 
 def skill_flavor(submission: dict, skill_md: str) -> str:
@@ -247,7 +295,7 @@ def main() -> int:
                 {
                     "name": name,
                     "title": submission.get("title", name),
-                    "description": submission.get("description", ""),
+                    "description": listed_description(submission, skill_md),
                     "publisher": meta.get("publisher"),
                     # See the plugin branch: the stable half of the identity.
                     "publisher_id": meta.get("publisher_id"),
@@ -315,7 +363,14 @@ def main() -> int:
     (out / "index.json").write_text(
         json.dumps(index, indent=2, ensure_ascii=False) + "\n", encoding="utf-8"
     )
-    (out / "index.html").write_text(REDIRECT_HTML, encoding="utf-8")
+
+    # The storefront, rendered from the feed that was just written: the pages
+    # a person reads can never be about a different index than the app's.
+    # (The path line is for callers that load this file by path, not from scripts/.)
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    import build_site
+
+    pages = build_site.build(index, out)
 
     # Ship the generated rules beside the feed so the upload endpoint and the
     # app read the limits rather than retyping them. The index still deploys
@@ -328,7 +383,7 @@ def main() -> int:
 
     print(
         f"index: {len(plugins)} plugin(s), {len(skills)} skill(s), "
-        f"{len(agents)} agent(s) -> {out / 'index.json'}"
+        f"{len(agents)} agent(s) -> {out / 'index.json'}; storefront: {pages} page(s)"
     )
     return 0
 

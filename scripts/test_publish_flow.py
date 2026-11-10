@@ -15,7 +15,12 @@ the real validator:
 - the page stops what a person can fix before they leave it (a taken name, a
   version that does not go up, a pasted credential);
 - the page reads a submission's state from the issue list the way the intake
-  labels it.
+  labels it;
+- a dropped look zip (deflated or stored, at the root or in one folder) is
+  read in the browser: its look.json fills the form, its SHA-256 and size are
+  the zip's own, and the submission it makes passes the real validator once
+  the release link is given; the pack rules stop what validate.py would stop,
+  and a look's folder is told to travel as a zip on a release.
 
 Usage:
     python scripts/test_publish_flow.py
@@ -23,12 +28,16 @@ Usage:
 
 from __future__ import annotations
 
+import hashlib
 import importlib.util
+import io
 import json
 import shutil
+import stat
 import subprocess
 import sys
 import tempfile
+import zipfile
 from pathlib import Path
 from urllib.parse import parse_qs, urlsplit
 
@@ -123,7 +132,51 @@ out.states = {
   old: p.issueState([issue("[publish] brief 1.2.1", ["published"], "2026-11-09T12:00:00Z")], sub, now),
   prefixOnly: p.issueState([issue("[publish] briefing 1.0.0", [])], sub, now),
 };
-process.stdout.write(JSON.stringify(out));
+const fs = require("fs");
+const zips = JSON.parse(fs.readFileSync(process.argv[4], "utf-8"));
+const release = "https://github.com/octocat/aurora-core/releases/download/v1.2.0/aurora-core.zip";
+(async () => {
+  out.looks = {};
+  for (const [label, path] of Object.entries(zips)) {
+    const draft = await p.readLookZip(new Uint8Array(fs.readFileSync(path)));
+    const result = { problem: draft.problem, fields: draft.fields, files: draft.files };
+    if (!draft.problem) {
+      const look = draft.parts.look;
+      result.sha256 = look.sha256;
+      result.size = look.size;
+      const withLink = Object.assign({}, draft.fields, { archive_url: release });
+      result.submission = p.buildSubmission("look", withLink, draft.parts);
+      result.handoff = p.handoff(result.submission, registry);
+      const problems = (fields) =>
+        p.problemsOf(p.buildSubmission("look", fields, draft.parts), {}, draft.parts).map((q) => q.field);
+      result.problems = {
+        ok: problems(withLink),
+        noLink: problems(draft.fields),
+        badLink: problems(Object.assign({}, withLink, { archive_url: "https://example.com/a.zip" })),
+        otherId: problems(Object.assign({}, withLink, { name: "other-look" })),
+        otherVersion: problems(Object.assign({}, withLink, { version: "9.9.9" })),
+        jarvisTitle: problems(Object.assign({}, withLink, { title: "Jarvis Glow" })),
+        longTitle: problems(Object.assign({}, withLink, { title: "x".repeat(41) })),
+        reserved: problems(Object.assign({}, withLink, { name: "orb" })),
+      };
+    }
+    out.looks[label] = result;
+  }
+  const lookJson = JSON.stringify({ format: "dodaios-look/1", id: "aurora-core" });
+  out.lookFolder = p.draftFromFiles([{ path: "aurora-core/look.json", text: lookJson },
+    { path: "aurora-core/index.html", text: "<canvas>" }], "skill");
+  const readyLook = { kind: "look", name: "aurora-core", version: "1.2.0", title: "Aurora Core",
+    description: "Glows.", license: "MIT", archive_url: release, sha256: "a".repeat(64) };
+  const readyDraft = p.draftFromFiles([{ path: "aurora-core.json", text: JSON.stringify(readyLook) }], "skill");
+  out.readyLook = p.buildSubmission(readyDraft.kind, readyDraft.fields, readyDraft.parts);
+  out.publishedLook = p.publishedNames({ looks: [{ name: "aurora-core", version: "1.2.0", publisher: "octocat" }] });
+  out.lookTaken = p.problemsOf(out.readyLook, { published: out.publishedLook }, readyDraft.parts)
+    .map((q) => q.field);
+  process.stdout.write(JSON.stringify(out));
+})().catch((err) => {
+  process.stderr.write(String(err && err.stack));
+  process.exit(1);
+});
 """
 
 
@@ -135,16 +188,78 @@ def load(name: str):
     return module
 
 
+LOOK_MANIFEST = {
+    "format": "dodaios-look/1",
+    "id": "aurora-core",
+    "name": "Aurora Core",
+    "description": "A slow aurora that brightens while Dodaios talks.",
+    "author": "Octo Cat",
+    "version": "1.2.0",
+    "license": "MIT AND CC-BY-4.0",
+    "preview": "preview.png",
+    "attribution": "Core model by Example Studio, CC-BY-4.0",
+}
+PNG = b"\x89PNG\r\n\x1a\n" + b"\x00" * 64
+
+
+def look_zip(*, top: str = "", method: int = zipfile.ZIP_DEFLATED, links: tuple[str, ...] = (),
+             replace: dict[str, bytes | None] | None = None) -> bytes:
+    """A look pack as a zip; ``replace`` changes, adds or (with None) drops files."""
+    files: dict[str, bytes] = {
+        "look.json": json.dumps(LOOK_MANIFEST).encode(),
+        "index.html": b"<!doctype html><canvas></canvas>" * 20,
+        "preview.png": PNG,
+        "vendor/three.module.js": b"export const REVISION = '170';\n" * 50,
+    }
+    for rel, body in (replace or {}).items():
+        if body is None:
+            files.pop(rel, None)
+        else:
+            files[rel] = body
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as archive:
+        for rel, body in files.items():
+            info = zipfile.ZipInfo(top + rel)
+            info.compress_type = method
+            if rel in links:
+                info.external_attr = (stat.S_IFLNK | 0o777) << 16
+            archive.writestr(info, body)
+    return buf.getvalue()
+
+
+def look_cases() -> dict[str, bytes]:
+    jarvis = dict(LOOK_MANIFEST, name="Jarvis Glow")
+    return {
+        "deflated": look_zip(top="aurora-core/"),
+        "stored": look_zip(method=zipfile.ZIP_STORED),
+        "traversal": look_zip(replace={"../evil.js": b"x"}),
+        "link": look_zip(links=("index.html",)),
+        "suffix": look_zip(replace={"run.exe": b"x"}),
+        "noManifest": look_zip(replace={"look.json": None}),
+        "noEntry": look_zip(replace={"index.html": None}),
+        "fakePreview": look_zip(replace={"preview.png": b"<svg onload=alert(1)>"}),
+        "jarvis": look_zip(replace={"look.json": json.dumps(jarvis).encode()}),
+        "notZip": b"this is not a zip",
+    }
+
+
 def main() -> int:
     node = shutil.which("node")
     if node is None:
         print("publish flow: SKIPPED (node is not installed)")
         return 0
+    cases = look_cases()
     with tempfile.TemporaryDirectory() as tmp:
         script = Path(tmp) / "run.cjs"
         script.write_text(NODE_SCRIPT, encoding="utf-8")
+        listing = {}
+        for label, data in cases.items():
+            (Path(tmp) / f"{label}.zip").write_bytes(data)
+            listing[label] = str(Path(tmp) / f"{label}.zip")
+        (Path(tmp) / "zips.json").write_text(json.dumps(listing), encoding="utf-8")
         proc = subprocess.run(
-            [node, str(script), str(ROOT / "site" / "publish.js"), REGISTRY],
+            [node, str(script), str(ROOT / "site" / "publish.js"), REGISTRY,
+             str(Path(tmp) / "zips.json")],
             capture_output=True,
             text=True,
             encoding="utf-8",
@@ -252,6 +367,90 @@ def main() -> int:
     check("a needs-changes label is a problem", states["needsChanges"] == "needs-changes")
     check("yesterday's issue is not this submission", states["old"] is None)
     check("a longer name is not this submission", states["prefixOnly"] is None)
+
+    # --- a look's zip ---------------------------------------------------------
+    looks = out["looks"]
+    for label in ("deflated", "stored"):
+        look = looks[label]
+        check(f"{label}: the zip is read ({look['problem']})", look["problem"] is None)
+        if look["problem"] is not None:
+            continue
+        data = cases[label]
+        fields = look["fields"]
+        check(f"{label}: look.json fills the ID", fields["name"] == "aurora-core")
+        check(f"{label}: look.json fills the version", fields["version"] == "1.2.0")
+        check(f"{label}: look.json fills the name", fields["title"] == "Aurora Core")
+        check(f"{label}: look.json fills the description",
+              fields["description"] == LOOK_MANIFEST["description"])
+        check(f"{label}: the SHA-256 is the zip's own",
+              look["sha256"] == hashlib.sha256(data).hexdigest())
+        check(f"{label}: the size is the zip's own", look["size"] == len(data))
+        check(f"{label}: the pack's files are listed without the top folder",
+              sorted(look["files"]) == sorted(
+                  ["look.json", "index.html", "preview.png", "vendor/three.module.js"]))
+        submission = look["submission"]
+        check(f"{label}: license and attribution come from look.json",
+              submission["license"] == LOOK_MANIFEST["license"]
+              and submission["attribution"] == LOOK_MANIFEST["attribution"])
+        check(f"{label}: the source is the release's repository",
+              submission["source_url"] == "https://github.com/octocat/aurora-core")
+        problems = look["problems"]
+        check(f"{label}: a complete look has no problems ({problems['ok']})", problems["ok"] == [])
+        check(f"{label}: no release link is stopped", problems["noLink"] == ["archive"])
+        check(f"{label}: a link off GitHub releases is stopped", problems["badLink"] == ["archive"])
+        check(f"{label}: an ID other than look.json's is stopped", problems["otherId"] == ["name"])
+        check(f"{label}: a version other than look.json's is stopped",
+              problems["otherVersion"] == ["version"])
+        check(f"{label}: Jarvis in the name is stopped", problems["jarvisTitle"] == ["title"])
+        check(f"{label}: a long name is stopped", problems["longTitle"] == ["title"])
+        check(f"{label}: the orb's ID is stopped", "name" in problems["reserved"])
+
+        # The same submission, through the issue and the real validator, with
+        # the release download faked to serve the zip that was dropped.
+        query = parse_qs(urlsplit(look["handoff"]["url"]).query)
+        read_back = intake.extract_submission(query["body"][0])
+        check(f"{label}: the intake reads the look back unchanged", read_back == submission)
+        validate.fetch_look_archive = lambda _url, data=data: data
+        found = accepted(submission)
+        check(f"{label}: the look passes the validator ({found})", found == [])
+
+    for label, needle in (
+        ("traversal", "not allowed"),
+        ("link", "link"),
+        ("suffix", "run.exe"),
+        ("noManifest", "no look.json"),
+        ("noEntry", "index.html"),
+        ("fakePreview", "not a PNG"),
+        ("notZip", "not a zip"),
+    ):
+        problem = looks[label]["problem"] or ""
+        check(f"{label}: the page stops it ({problem!r})", needle in problem)
+        validate.fetch_look_archive = lambda _url, data=cases[label]: data
+        doc = {
+            "kind": "look", "name": "aurora-core", "version": "1.2.0", "title": "Aurora Core",
+            "description": "x", "license": "MIT AND CC-BY-4.0",
+            "source_url": "https://github.com/octocat/aurora-core",
+            "archive_url": "https://github.com/octocat/aurora-core/releases/download/v1/a.zip",
+            "sha256": hashlib.sha256(cases[label]).hexdigest(),
+        }
+        check(f"{label}: the validator stops it too", accepted(doc) != [])
+    jarvis = looks["jarvis"]
+    check("a pack named Jarvis is read", jarvis["problem"] is None)
+    if jarvis["problem"] is None:
+        check("…and stopped",
+              "title" in jarvis["problems"]["ok"] and "file" in jarvis["problems"]["ok"])
+
+    folder = out["lookFolder"]
+    check("a look's folder is recognised as a look", folder["kind"] == "look")
+    check("a look's folder is told to travel as a zip on a release",
+          "zip" in folder["problem"] and "release" in folder["problem"])
+    check("a finished look submission is taken whole",
+          out["readyLook"]["kind"] == "look"
+          and out["readyLook"]["archive_url"].endswith("/aurora-core.zip")
+          and out["readyLook"]["sha256"] == "a" * 64)
+    check("published looks are known by name",
+          out["publishedLook"].get("aurora-core", {}).get("kind") == "look")
+    check("a look that does not raise its version is stopped", out["lookTaken"] == ["version"])
 
     if failures:
         print("FAIL:")

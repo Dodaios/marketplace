@@ -16,7 +16,7 @@
 (function (root) {
   "use strict";
 
-  var KINDS = ["skill", "plugin", "agent"];
+  var KINDS = ["skill", "plugin", "agent", "look"];
   var NAME_RE = /^[a-z0-9](?:[a-z0-9.-]{0,62}[a-z0-9])?$/;
   var SEMVER_RE = /^\d+\.\d+\.\d+$/;
   var TITLE_TAG = "[publish]";
@@ -195,6 +195,26 @@
         description: ready.description || (ready.plugin_json && ready.plugin_json.description) || "",
         categories: Array.isArray(ready.categories) ? ready.categories.join(", ") : "",
       };
+      if (ready.kind === "look") {
+        /* A finished look submission: its digest was computed elsewhere. */
+        draft.parts = {
+          look: {
+            manifest: null,
+            sha256: ready.sha256 || "",
+            size: null,
+            license: ready.license || "",
+            attribution: ready.attribution || "",
+          },
+        };
+        draft.fields.archive_url = ready.archive_url || "";
+      }
+      return draft;
+    }
+
+    if (byName["look.json"]) {
+      /* A look's folder: it travels as a zip on a release, not as files. */
+      draft.kind = "look";
+      draft.problem = LOOK_HOW_TO;
       return draft;
     }
 
@@ -282,8 +302,316 @@
     }
 
     draft.problem =
-      "This cannot be published. Drop a SKILL.md, a plugin folder with a plugin.json, or an agent file exported from the app.";
+      "This cannot be published. Drop a SKILL.md, a plugin folder with a plugin.json, an agent file exported from the app, or a look's zip.";
     return draft;
+  }
+
+  // ----------------------------------------------------------------- looks
+  //
+  // A look is published as a zip attached to a GitHub release. This page
+  // cannot upload the release or download it (release downloads send no CORS
+  // headers), so it reads the zip the person dropped: the same bytes they
+  // attach. It runs the registry's pack checks as early feedback, computes
+  // the SHA-256 and asks for the release link. scripts/validate.py downloads
+  // the archive again and stays the authority. Keep these rules in sync with
+  // the look section of validate.py (and so with dodaios/ui/looks/ in the app).
+
+  var LOOK_FORMAT = "dodaios-look/1";
+  var LOOK_ID_RE = /^[a-z0-9][a-z0-9-]{1,47}$/;
+  var LOOK_VERSION_RE = /^\d{1,4}\.\d{1,4}\.\d{1,4}$/;
+  var LOOK_LICENSE_RE = /^[A-Za-z0-9.+-]{2,40}(?: (?:AND|OR) [A-Za-z0-9.+-]{2,40}){0,3}$/;
+  var LOOK_REL_PATH_RE = /^(?:[A-Za-z0-9_][A-Za-z0-9_.-]{0,63}\/){0,4}[A-Za-z0-9_][A-Za-z0-9_.-]{0,63}$/;
+  var LOOK_ARCHIVE_URL_RE =
+    /^https:\/\/github\.com\/[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})\/[A-Za-z0-9._-]{1,100}\/releases\/download\/[A-Za-z0-9._+-]{1,128}\/[A-Za-z0-9._-]{1,128}\.zip$/;
+  var LOOK_SUFFIXES = [
+    ".html", ".js", ".mjs", ".css", ".json", ".txt", ".md", ".png", ".jpg", ".jpeg", ".webp",
+    ".svg", ".glb", ".gltf", ".bin", ".ktx2", ".hdr", ".woff2", ".wasm",
+  ];
+  var LOOK_PREVIEW_SUFFIXES = [".png", ".jpg", ".jpeg", ".webp", ".svg"];
+  var LOOK_RESERVED = ["default", "none", "orb", "pulse-ring"];
+  var LOOK_LIMITS = {
+    archive: 25 * 1024 * 1024 + 2 * 1024 * 1024,
+    pack: 25 * 1024 * 1024,
+    files: 300,
+    manifest: 16 * 1024,
+    title: 40,
+    description: 200,
+    attribution: 200,
+  };
+  var TRADEMARK_RE = /jarvis/i;
+  var LOOK_HOW_TO =
+    "A look is published as a zip attached to a GitHub release. Zip the look's folder, " +
+    "create a release on your GitHub repository, attach the zip to it, then drop that same zip here.";
+
+  function lookPathOk(path) {
+    if (typeof path !== "string" || !LOOK_REL_PATH_RE.test(path)) return false;
+    return path.split("/").every(function (part) {
+      return part !== "." && part !== "..";
+    });
+  }
+
+  function lookSuffix(path) {
+    var dot = path.lastIndexOf(".");
+    return dot > path.lastIndexOf("/") ? path.slice(dot).toLowerCase() : "";
+  }
+
+  function u16(bytes, at) {
+    return bytes[at] | (bytes[at + 1] << 8);
+  }
+
+  function u32(bytes, at) {
+    return (bytes[at] | (bytes[at + 1] << 8) | (bytes[at + 2] << 16) | (bytes[at + 3] << 24)) >>> 0;
+  }
+
+  /**
+   * The zip's central directory as `[{name, method, flags, size, compressedSize,
+   * offset, mode, isDir}]`. Throws an Error whose message a person can read.
+   */
+  function zipDirectory(bytes) {
+    var end = -1;
+    for (var at = bytes.length - 22; at >= Math.max(0, bytes.length - 65557); at--) {
+      if (u32(bytes, at) === 0x06054b50) {
+        end = at;
+        break;
+      }
+    }
+    if (end < 0) throw new Error("This is not a zip file.");
+    var count = u16(bytes, end + 10);
+    var offset = u32(bytes, end + 16);
+    if (count === 0xffff || offset === 0xffffffff) throw new Error("This zip is too large for a look.");
+    var decoder = new TextDecoder("utf-8");
+    var entries = [];
+    for (var i = 0; i < count; i++) {
+      if (offset + 46 > bytes.length || u32(bytes, offset) !== 0x02014b50) {
+        throw new Error("This zip file is damaged.");
+      }
+      var nameLength = u16(bytes, offset + 28);
+      var name = decoder.decode(bytes.subarray(offset + 46, offset + 46 + nameLength));
+      entries.push({
+        name: name,
+        flags: u16(bytes, offset + 8),
+        method: u16(bytes, offset + 10),
+        compressedSize: u32(bytes, offset + 20),
+        size: u32(bytes, offset + 24),
+        mode: (u32(bytes, offset + 38) >>> 16) & 0xffff,
+        offset: u32(bytes, offset + 42),
+        isDir: name.charAt(name.length - 1) === "/",
+      });
+      offset += 46 + nameLength + u16(bytes, offset + 30) + u16(bytes, offset + 32);
+    }
+    return entries;
+  }
+
+  /** One entry's bytes: stored as is, deflated through DecompressionStream. */
+  function zipEntryData(bytes, entry) {
+    var at = entry.offset;
+    if (u32(bytes, at) !== 0x04034b50) return Promise.reject(new Error("This zip file is damaged."));
+    var start = at + 30 + u16(bytes, at + 26) + u16(bytes, at + 28);
+    var raw = bytes.subarray(start, start + entry.compressedSize);
+    if (entry.method === 0) return Promise.resolve(raw);
+    if (entry.method !== 8 || typeof DecompressionStream === "undefined") {
+      return Promise.reject(new Error("This browser cannot read " + entry.name + " in the zip."));
+    }
+    var stream = new Blob([raw]).stream().pipeThrough(new DecompressionStream("deflate-raw"));
+    return new Response(stream).arrayBuffer().then(function (buffer) {
+      if (buffer.byteLength !== entry.size) throw new Error("The zip's sizes do not match its contents.");
+      return new Uint8Array(buffer);
+    });
+  }
+
+  /**
+   * The pack's files by path, after the registry's archive rules
+   * (validate.py _zip_members). Returns `{problem}` or `{members}`.
+   */
+  function lookMembers(entries) {
+    var files = entries.filter(function (entry) {
+      return !entry.isDir;
+    });
+    if (!files.length) return { problem: "The zip is empty." };
+    if (files.length > LOOK_LIMITS.files) return { problem: "A look may hold at most " + LOOK_LIMITS.files + " files." };
+    var names = files.map(function (entry) {
+      return entry.name.replace(/\\/g, "/");
+    });
+    var tops = {};
+    names.forEach(function (name) {
+      tops[name.split("/")[0]] = true;
+    });
+    var strip = "";
+    if (Object.keys(tops).length === 1 && names.every(function (name) {
+      return name.indexOf("/") !== -1;
+    })) {
+      strip = Object.keys(tops)[0] + "/";
+    }
+    var members = {};
+    var folded = {};
+    var total = 0;
+    for (var i = 0; i < files.length; i++) {
+      var entry = files[i];
+      var name = names[i];
+      if (entry.mode && (entry.mode & 0xf000) === 0xa000) return { problem: "The zip contains a link: " + name + "." };
+      if (entry.flags & 0x1) return { problem: "The zip is encrypted." };
+      var rel = strip ? name.slice(strip.length) : name;
+      if (!lookPathOk(rel)) return { problem: "The zip contains a file name that is not allowed: " + name + "." };
+      if (LOOK_SUFFIXES.indexOf(lookSuffix(rel)) === -1) {
+        return { problem: "A look cannot hold " + rel + ": that kind of file is not allowed." };
+      }
+      if (folded[rel.toLowerCase()]) return { problem: "The zip holds " + rel + " twice." };
+      folded[rel.toLowerCase()] = true;
+      total += entry.size;
+      if (total > LOOK_LIMITS.pack) return { problem: "A look may be at most 25 MB unpacked." };
+      members[rel] = entry;
+    }
+    var clash = Object.keys(members).filter(function (rel) {
+      var parts = rel.toLowerCase().split("/");
+      for (var depth = 1; depth < parts.length; depth++) {
+        if (folded[parts.slice(0, depth).join("/")]) return true;
+      }
+      return false;
+    });
+    if (clash.length) return { problem: clash[0] + " sits inside a path that is also a file." };
+    return { members: members };
+  }
+
+  function plainText(value, label, limit, required) {
+    if (value === undefined || value === null) value = "";
+    if (typeof value !== "string") return { problem: "look.json: " + label + " must be text." };
+    value = value.trim();
+    if (required && !value) return { problem: "look.json needs a " + label + "." };
+    if (value.length > limit) return { problem: "look.json: " + label + " is longer than " + limit + " characters." };
+    if (/[\u0000-\u001f]/.test(value)) return { problem: "look.json: " + label + " contains control characters." };
+    return { value: value };
+  }
+
+  /** look.json, checked like the app checks it. Returns `{problem}` or `{manifest}`. */
+  function parseLookManifest(doc) {
+    if (!doc || typeof doc !== "object" || Array.isArray(doc)) return { problem: "look.json must hold one JSON object." };
+    if (doc.format !== LOOK_FORMAT) return { problem: 'look.json must say "format": "' + LOOK_FORMAT + '".' };
+    if (typeof doc.id !== "string" || !LOOK_ID_RE.test(doc.id)) {
+      return { problem: "look.json: id must be 2 to 48 lowercase letters, digits or hyphens." };
+    }
+    var out = { id: doc.id };
+    var texts = [
+      ["name", "name", LOOK_LIMITS.title, true],
+      ["description", "description", LOOK_LIMITS.description, false],
+      ["author", "author", 60, true],
+      ["version", "version", 14, true],
+      ["license", "license", 120, true],
+      ["attribution", "attribution", LOOK_LIMITS.attribution, false],
+      ["homepage", "homepage", 200, false],
+    ];
+    for (var i = 0; i < texts.length; i++) {
+      var read = plainText(doc[texts[i][0]], texts[i][1], texts[i][2], texts[i][3]);
+      if (read.problem) return read;
+      out[texts[i][0]] = read.value;
+    }
+    if (!LOOK_VERSION_RE.test(out.version)) return { problem: "look.json: version must look like 1.0.0." };
+    if (!LOOK_LICENSE_RE.test(out.license)) {
+      return { problem: "look.json: license must be an SPDX id such as Apache-2.0." };
+    }
+    if (out.homepage && out.homepage.indexOf("https://") !== 0) {
+      return { problem: "look.json: homepage must start with https://." };
+    }
+    out.entry = doc.entry === undefined ? "index.html" : doc.entry;
+    if (!lookPathOk(out.entry) || lookSuffix(out.entry) !== ".html") {
+      return { problem: "look.json: entry must be the path of an .html file in the pack." };
+    }
+    out.preview = doc.preview;
+    if (!lookPathOk(out.preview) || LOOK_PREVIEW_SUFFIXES.indexOf(lookSuffix(out.preview)) === -1) {
+      return { problem: "look.json: preview must be the path of a .png, .jpg, .webp or .svg file." };
+    }
+    return { manifest: out };
+  }
+
+  function previewMatches(suffix, bytes) {
+    var starts = function (list) {
+      return list.every(function (value, index) {
+        return bytes[index] === value;
+      });
+    };
+    if (suffix === ".png") return starts([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+    if (suffix === ".jpg" || suffix === ".jpeg") return starts([0xff, 0xd8, 0xff]);
+    if (suffix === ".webp") {
+      return starts([0x52, 0x49, 0x46, 0x46]) && bytes[8] === 0x57 && bytes[9] === 0x45 && bytes[10] === 0x42 && bytes[11] === 0x50;
+    }
+    return true;
+  }
+
+  function hex(buffer) {
+    return Array.prototype.map.call(new Uint8Array(buffer), function (value) {
+      return ("0" + value.toString(16)).slice(-2);
+    }).join("");
+  }
+
+  /**
+   * Read a dropped look zip into a draft. Resolves (never rejects) with
+   * `{kind: "look", fields, parts: {look}, files, problem}`.
+   */
+  function readLookZip(bytes) {
+    var draft = { kind: "look", fields: {}, parts: {}, files: [], problem: null };
+    var fail = function (message) {
+      draft.problem = message;
+      return draft;
+    };
+    if (bytes.length > LOOK_LIMITS.archive) return Promise.resolve(fail("A look's zip may be at most 27 MB."));
+    var members;
+    try {
+      var checked = lookMembers(zipDirectory(bytes));
+      if (checked.problem) return Promise.resolve(fail(checked.problem));
+      members = checked.members;
+    } catch (err) {
+      return Promise.resolve(fail(err.message));
+    }
+    if (!members["look.json"]) return Promise.resolve(fail("The zip has no look.json. " + LOOK_HOW_TO));
+    if (members["look.json"].size > LOOK_LIMITS.manifest) return Promise.resolve(fail("look.json is too large."));
+    var manifest;
+    return zipEntryData(bytes, members["look.json"])
+      .then(function (raw) {
+        var doc = parseJson(new TextDecoder("utf-8").decode(raw).replace(/^﻿/, ""));
+        if (!doc) throw new Error("look.json could not be read as JSON.");
+        var parsed = parseLookManifest(doc);
+        if (parsed.problem) throw new Error(parsed.problem);
+        manifest = parsed.manifest;
+        if (!members[manifest.entry]) throw new Error("The pack has no file " + manifest.entry + ".");
+        if (!members[manifest.preview]) throw new Error("The pack has no file " + manifest.preview + ".");
+        return zipEntryData(bytes, members[manifest.preview]);
+      })
+      .then(function (preview) {
+        var suffix = lookSuffix(manifest.preview);
+        if (!previewMatches(suffix, preview)) {
+          throw new Error("The preview " + manifest.preview + " is not a " + suffix.slice(1).toUpperCase() + " picture.");
+        }
+        return crypto.subtle.digest("SHA-256", bytes);
+      })
+      .then(function (digest) {
+        draft.files = Object.keys(members);
+        draft.parts = {
+          look: {
+            manifest: manifest,
+            sha256: hex(digest),
+            size: bytes.length,
+            license: manifest.license,
+            attribution: manifest.attribution,
+          },
+        };
+        draft.fields = {
+          name: manifest.id,
+          version: manifest.version,
+          title: manifest.name,
+          description: manifest.description,
+          categories: "",
+          archive_url: "",
+        };
+        return draft;
+      })
+      .catch(function (err) {
+        return fail(err && err.message ? err.message : "The zip could not be read.");
+      });
+  }
+
+  /** The repository a release asset belongs to: what the look's source is. */
+  function repositoryOf(archiveUrl) {
+    var hit = /^(https:\/\/github\.com\/[^/]+\/[^/]+)\/releases\/download\//.exec(String(archiveUrl || ""));
+    return hit ? hit[1] : "";
   }
 
   /** Up to two letters that stand for a title: "Three Bullet Brief" is "TB". */
@@ -346,6 +674,16 @@
     }
     out.title = title;
     out.description = description;
+    if (kind === "look") {
+      var look = parts.look || {};
+      var archive = String(fields.archive_url || "").trim();
+      out.license = look.license || "";
+      if (look.attribution) out.attribution = look.attribution;
+      out.source_url = repositoryOf(archive);
+      out.archive_url = archive;
+      out.sha256 = look.sha256 || "";
+      return out;
+    }
     out.categories = categoriesOf(fields.categories);
     if (kind === "agent") {
       out.agent = parts.agent || {};
@@ -377,7 +715,7 @@
   /** Every published entry of the feed as `{name: {kind, version, publisher}}`. */
   function publishedNames(index) {
     var out = {};
-    [["plugin", "plugins"], ["skill", "skills"], ["agent", "agents"]].forEach(function (pair) {
+    [["plugin", "plugins"], ["skill", "skills"], ["agent", "agents"], ["look", "looks"]].forEach(function (pair) {
       ((index && index[pair[1]]) || []).forEach(function (entry) {
         if (entry && typeof entry.name === "string") {
           out[entry.name] = { kind: pair[0], version: entry.version || "", publisher: entry.publisher || "" };
@@ -393,7 +731,7 @@
    * The registry's validator stays the authority and runs again on GitHub.
    * This catches what a person can fix before they leave the page.
    */
-  function problemsOf(submission, context) {
+  function problemsOf(submission, context, parts) {
     var rules = (context && context.rules) || {};
     var limits = rules.limits || DEFAULT_LIMITS;
     var reserved = rules.reserved || {};
@@ -412,9 +750,51 @@
       add("name", "This ID belongs to a plugin that ships with the app. Pick another.");
     } else if (kind === "skill" && (reserved.skill_names || []).indexOf(name) !== -1) {
       add("name", "This ID belongs to a skill that ships with the app. Pick another.");
+    } else if (kind === "look" && !LOOK_ID_RE.test(name)) {
+      add("name", "A look's ID is 2 to 48 lowercase letters, digits and hyphens.");
+    } else if (kind === "look" && (reserved.look_ids || LOOK_RESERVED).indexOf(name) !== -1) {
+      add("name", "This ID belongs to the app's own looks. Pick another.");
+    } else if (kind === "look" && TRADEMARK_RE.test(name)) {
+      add("name", "Pick an ID without “Jarvis”: it is another company's trademark.");
     }
 
     if (!SEMVER_RE.test(submission.version || "")) add("version", "Use three numbers, like 1.0.0.");
+    else if (kind === "look" && !LOOK_VERSION_RE.test(submission.version)) {
+      add("version", "Use three numbers of at most four digits, like 1.0.0.");
+    }
+
+    if (kind === "look") {
+      var look = (parts && parts.look) || {};
+      var manifest = look.manifest;
+      /* The zip is what gets checked, so the form may not disagree with it. */
+      if (manifest && name && name !== manifest.id) {
+        add("name", "look.json says the ID is " + manifest.id + ". Change it there and zip again.");
+      }
+      if (manifest && submission.version && submission.version !== manifest.version) {
+        add("version", "look.json says the version is " + manifest.version + ". Change it there and zip again.");
+      }
+      var lookTitle = String(submission.title || "").trim();
+      if (lookTitle.length > LOOK_LIMITS.title) add("title", "Keep the name under " + LOOK_LIMITS.title + " characters.");
+      else if (TRADEMARK_RE.test(lookTitle)) add("title", "Pick a name without “Jarvis”: it is another company's trademark.");
+      if (String(submission.description || "").length > LOOK_LIMITS.description) {
+        add("description", "Keep the description under " + LOOK_LIMITS.description + " characters.");
+      }
+      if (!/^[0-9a-f]{64}$/.test(submission.sha256 || "")) add("file", "Drop the look's zip.");
+      else if (!LOOK_LICENSE_RE.test(submission.license || "")) {
+        add("file", "look.json needs a license, an SPDX id such as Apache-2.0.");
+      } else if (manifest && TRADEMARK_RE.test(manifest.name)) {
+        add("file", "look.json's name may not contain “Jarvis”: it is another company's trademark.");
+      }
+      var archive = submission.archive_url || "";
+      if (!archive) add("archive", "Paste the link of this zip on your GitHub release.");
+      else if (!LOOK_ARCHIVE_URL_RE.test(archive)) {
+        add(
+          "archive",
+          "Use the zip's download link from a GitHub release: " +
+            "https://github.com/you/repo/releases/download/v1.0.0/look.zip",
+        );
+      }
+    }
 
     var taken = name ? published[name] : null;
     if (taken) {
@@ -447,6 +827,8 @@
       if (!submission.plugin_json || !Object.keys(submission.plugin_json).length || !submission.plugin_json.extensions) {
         add("file", "Drop the plugin's folder, or at least its plugin.json.");
       }
+    } else if (kind === "look") {
+      /* Checked above. */
     } else if (!submission.agent || typeof submission.agent.instructions !== "string") {
       add("file", "Drop the agent file the app exported (open the agent, press Share).");
     }
@@ -531,6 +913,12 @@
     readSkill: readSkill,
     normalizeSkill: normalizeSkill,
     draftFromFiles: draftFromFiles,
+    zipDirectory: zipDirectory,
+    lookMembers: lookMembers,
+    parseLookManifest: parseLookManifest,
+    readLookZip: readLookZip,
+    repositoryOf: repositoryOf,
+    LOOK_HOW_TO: LOOK_HOW_TO,
     monogram: monogram,
     nameHue: nameHue,
     nextVersion: nextVersion,
@@ -557,7 +945,7 @@
   var REGISTRY = form.getAttribute("data-registry");
   var API = form.getAttribute("data-api");
   var WATCH_KEY = "dodaios-publish-watch";
-  var KIND_LABEL = { skill: "Skill", plugin: "Plugin", agent: "Agent" };
+  var KIND_LABEL = { skill: "Skill", plugin: "Plugin", agent: "Agent", look: "Look" };
   var $ = function (selector) {
     return form.querySelector(selector);
   };
@@ -566,6 +954,7 @@
     version: $("[name=version]"),
     title: $("[name=title]"),
     description: $("[name=description]"),
+    archive: $("[name=archive_url]"),
   };
   /*
    * `origin` is what was dropped, `files` what of it is packed. The ID and the
@@ -609,6 +998,7 @@
       title: input.title.value,
       description: input.description.value,
       categories: state.categories,
+      archive_url: input.archive.value,
     };
   }
 
@@ -626,7 +1016,7 @@
   }
 
   function render() {
-    var problems = problemsOf(submission(), context);
+    var problems = problemsOf(submission(), context, state.parts);
     var byField = {};
     problems.forEach(function (problem) {
       if (!byField[problem.field]) byField[problem.field] = problem.message;
@@ -648,6 +1038,7 @@
     $("[data-drop]").hidden = loaded;
     $("[data-loaded]").hidden = !loaded;
     $("[data-row-title]").hidden = state.kind === "plugin";
+    $("[data-row-archive]").hidden = !(loaded && state.kind === "look");
     if (loaded) {
       var title = input.title.value.trim() || input.name.value.trim() || state.origin;
       var mark = $("[data-pack-mark]");
@@ -659,9 +1050,14 @@
       var listed = names.slice(0, 3).join(", ") + (names.length > 3 ? " +" + (names.length - 3) : "");
       /* Somebody about to update an entry should see whose it is. */
       var taken = context.published[input.name.value.trim()];
+      var look = state.kind === "look" ? state.parts.look || {} : null;
       var detail = taken && taken.kind === state.kind
         ? "Update to " + input.version.value.trim() + " · published by @" + taken.publisher
-        : names.length > 1 || names[0] !== state.origin.toLowerCase() ? listed : "";
+        : look && look.size
+          ? (look.size < 1024 * 1024
+            ? Math.max(1, Math.round(look.size / 1024)) + " kB"
+            : (look.size / (1024 * 1024)).toFixed(1) + " MB") + " · " + names.length + " files"
+          : names.length > 1 || names[0] !== state.origin.toLowerCase() ? listed : "";
       $("[data-pack-meta]").textContent = KIND_LABEL[state.kind] + (detail ? " · " + detail : "");
     }
     return problems.concat(loaded ? [] : [{ field: "file", message: byField.file }]);
@@ -681,13 +1077,17 @@
     state.categories = draft.fields.categories || "";
     state.fileVersion = draft.fields.version || "";
     state.nameTouched = Boolean(draft.fields.name);
-    state.versionTouched = false;
+    /* A look's version is the one in its look.json, never a suggestion. */
+    state.versionTouched = draft.kind === "look";
     input.title.value = draft.fields.title || "";
+    input.archive.value = draft.fields.archive_url || "";
     input.description.value = draft.fields.description || "";
     input.name.value = draft.fields.name || "";
     follow();
+    if (draft.kind === "look") input.version.value = draft.fields.version || "";
     render();
-    (state.kind === "plugin" || input.title.value ? input.description : input.title).focus();
+    if (state.kind === "look" && input.title.value && input.description.value) input.archive.focus();
+    else (state.kind === "plugin" || input.title.value ? input.description : input.title).focus();
   }
 
   // --- reading what was dropped or chosen ----------------------------------
@@ -742,6 +1142,25 @@
     });
   }
 
+  /** A dropped zip is a look: read its bytes, not its text. */
+  function loadZip(file) {
+    if (file.size > 27 * 1024 * 1024) {
+      apply({ problem: "A look's zip may be at most 27 MB." }, "");
+      return;
+    }
+    file.arrayBuffer().then(function (buffer) {
+      return readLookZip(new Uint8Array(buffer));
+    }).then(function (draft) {
+      apply(draft, file.name);
+    }, function () {
+      apply({ problem: "The zip could not be read." }, "");
+    });
+  }
+
+  function isZip(file) {
+    return Boolean(file) && /\.zip$/i.test(file.name || "");
+  }
+
   function load(promise, origin) {
     promise.then(function (files) {
       files = files.filter(Boolean).slice(0, 60);
@@ -773,6 +1192,10 @@
     form.removeAttribute("data-over");
     /* Both lists are only readable while the event is being handled. */
     var dropped = Array.prototype.slice.call(event.dataTransfer.files || []);
+    if (dropped.length === 1 && isZip(dropped[0])) {
+      loadZip(dropped[0]);
+      return;
+    }
     var items = Array.prototype.slice.call(event.dataTransfer.items || []);
     var entries = items
       .map(function (item) {
@@ -801,6 +1224,11 @@
     picker.addEventListener("change", function () {
       var picked = Array.prototype.slice.call(picker.files || []);
       if (!picked.length) return;
+      if (picked.length === 1 && isZip(picked[0])) {
+        loadZip(picked[0]);
+        picker.value = "";
+        return;
+      }
       var folder = picker.hasAttribute("webkitdirectory") && picked[0].webkitRelativePath;
       var label = folder
         ? picked[0].webkitRelativePath.split("/")[0]
@@ -827,6 +1255,7 @@
     state.origin = "";
     state.fileVersion = "";
     state.dropProblem = "";
+    input.archive.value = "";
     render();
   });
 

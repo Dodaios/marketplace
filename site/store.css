@@ -1291,3 +1291,9 @@ p.problem {
     transition: none !important;
   }
 }
+
+.field__hint {
+  color: var(--muted);
+  font-size: 0.8125rem;
+  line-height: 1.45;
+}

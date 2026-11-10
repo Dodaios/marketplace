@@ -188,6 +188,12 @@ def main() -> int:
         )
         check("it carries no manual", "<ol" not in publish and "<h2" not in publish)
         check(
+            "it takes a look's zip and asks for its release link",
+            ".zip" in publish and 'name="archive_url"' in publish
+            and 'data-problem="archive"' in publish,
+        )
+        check("the release link shows for a look only", "data-row-archive hidden" in publish)
+        check(
             "a changed stylesheet gets a new address",
             'href="assets/store.css?v=' in home and 'href="../assets/store.css?v=' in publish,
         )

@@ -232,7 +232,11 @@ The rules are the app's own, and CI checks every one of them:
    release asset. **You host the archive; this registry never stores it.**
 2. Compute its SHA-256: `sha256sum aurora-core.zip` (macOS:
    `shasum -a 256`, Windows: `Get-FileHash aurora-core.zip`).
-3. Submit (pull request, issue, or the app) this JSON:
+3. The easy way: drop the same zip on the
+   [publish page](https://dodaios.ai/marketplace/publish/). It reads
+   `look.json` and computes the SHA-256 in your browser, checks the pack, and
+   asks only for the release link. Or submit (pull request, issue, or the
+   app) this JSON yourself:
 
 ```json
 {

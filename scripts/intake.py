@@ -122,6 +122,19 @@ def install_line(doc: dict) -> str:
     return f"dodaios marketplace install {doc['name']}"
 
 
+def install_hint(doc: dict) -> str:
+    """How the published entry installs, as the answer on the issue says it."""
+    if doc.get("kind") == "look":
+        # Looks install from the app's Marketplace; the command line does not
+        # list them.
+        return (
+            "Install it in the app: open **Marketplace**, find it under **Looks** and "
+            "press **Install**. Keep the release asset in place: the app downloads it "
+            "from there and checks it against the pinned SHA-256."
+        )
+    return f"Install it with:\n\n```\n{install_line(doc)}\n```"
+
+
 def answer(repo: str, number: int, body: str) -> None:
     gh("issue", "comment", str(number), "--repo", repo, "--body", body)
 
@@ -244,7 +257,7 @@ def main() -> int:
         message = (
             f"Published **{name}** {doc.get('version')} as @{doc['publisher']}. "
             "It reaches the marketplace feed within a few minutes.\n\n"
-            f"Install it with:\n\n```\n{install_line(doc)}\n```\n\n"
+            f"{install_hint(doc)}\n\n"
             "To publish an update, open a new submission with a higher version."
         )
     else:

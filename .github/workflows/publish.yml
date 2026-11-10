@@ -29,14 +29,18 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+      # Pillow re-encodes each look's preview into a fresh PNG (at most 512 px),
+      # so the site never serves the bytes a publisher shipped.
+      - name: Install the image toolchain
+        run: pip install "Pillow==11.3.0"
       - name: Expand submissions into the package layout
         run: python scripts/expand.py
       - name: Commit the expansion
         run: |
           git config user.name "marketplace-bot"
           git config user.email "actions@github.com"
-          mkdir -p agents
-          git add plugins skills agents registry.json
+          mkdir -p agents looks
+          git add plugins skills agents looks registry.json
           if ! git diff --cached --quiet; then
             git commit -m "chore(registry): expand submissions [bot]"
             git push

@@ -44,14 +44,20 @@ PRODUCT = "Dodaios"
 #: The manifest block the app reads its own fields from, current name first.
 EXTENSION_NAMESPACES = ("io.github.dodaios", "io.github.personaljarvis")
 
-KINDS = ("plugin", "skill", "agent")
-KIND_LABEL = {"plugin": "Plugin", "skill": "Skill", "agent": "Agent"}
-KIND_PLURAL = {"plugin": "Plugins", "skill": "Skills", "agent": "Agents"}
+KINDS = ("plugin", "skill", "agent", "look")
+KIND_LABEL = {"plugin": "Plugin", "skill": "Skill", "agent": "Agent", "look": "Look"}
+KIND_PLURAL = {"plugin": "Plugins", "skill": "Skills", "agent": "Agents", "look": "Looks"}
 KIND_HINT = {
     "plugin": "Connect an outside service and its tools",
     "skill": "Instructions that teach a new way of working",
     "agent": "Ready-made teammates with a job and their own instructions",
+    "look": "Visuals that take the voice orb's place",
 }
+#: The only address a look's preview picture is shown from: this registry's
+#: own Pages site, where the publish build put the re-encoded PNG.
+LOOK_PREVIEW_RE = re.compile(
+    r"https://dodaios\.github\.io/marketplace/looks/[a-z0-9-]+/preview-[0-9a-f]{12}\.png"
+)
 AUTH_LABEL = {
     "pat_paste": "Personal access token",
     "oauth_device_flow": "Device sign-in",
@@ -350,7 +356,7 @@ def entries_of(index: dict) -> list[dict]:
                 "source": plugin,
             }
         )
-    for kind, key in (("skill", "skills"), ("agent", "agents")):
+    for kind, key in (("skill", "skills"), ("agent", "agents"), ("look", "looks")):
         for item in index.get(key, []):
             categories = item.get("categories")
             entries.append(
@@ -365,6 +371,9 @@ def entries_of(index: dict) -> list[dict]:
                     "source": item,
                 }
             )
+            if kind == "look":
+                preview = str(item.get("preview_url") or "")
+                entries[-1]["preview_url"] = preview if LOOK_PREVIEW_RE.fullmatch(preview) else ""
     for entry in entries:
         source = entry["source"]
         entry["publisher"] = _readable(source.get("publisher"))
@@ -411,8 +420,14 @@ def _ink_on(hex_colour: str) -> str:
 
 
 def mark(entry: dict, *, page: bool = False) -> str:
-    """The face of an entry: a brand tile for a plugin, a monogram otherwise."""
+    """The face of an entry: a brand tile for a plugin, a look's own preview,
+    a monogram otherwise."""
     size = " mark--page" if page else ""
+    if entry["kind"] == "look" and entry.get("preview_url"):
+        return (
+            f'<span class="mark mark--look{size}" aria-hidden="true">'
+            f'<img src="{esc(entry["preview_url"])}" alt="" loading="lazy"></span>'
+        )
     letters = esc(monogram(entry["title"]))
     colour = entry.get("logo_color", "")
     slug = entry.get("logo_slug", "")
@@ -462,6 +477,10 @@ def byline(entry: dict, *, with_kind: bool) -> str:
 def install_commands(entry: dict) -> list[tuple[str, str, str]]:
     """``(heading, command, note)`` for every way this entry installs."""
     name = entry["name"]
+    if entry["kind"] == "look":
+        # A look installs from the app's Marketplace; the command line does
+        # not list looks.
+        return []
     commands = [
         (
             f"Install in {PRODUCT}",
@@ -621,12 +640,13 @@ def home_page(entries: list[dict]) -> str:
     body = f"""<section class="hero" id="top">
 <p class="eyebrow">Community</p>
 <h1>Marketplace</h1>
-<p class="standfirst">Plugins, skills and agents for {PRODUCT}, made by the people who use it.
+<p class="standfirst">Plugins, skills, agents and looks for {PRODUCT}, made by the people
+who use it.
 Open one, read every file, then install it with one line.</p>
 <div class="search" role="search">
 {SVG_SEARCH}
-<input type="search" placeholder="Search plugins, skills and agents" autocomplete="off"
- aria-label="Search plugins, skills and agents" data-store-search>
+<input type="search" placeholder="Search plugins, skills, agents and looks" autocomplete="off"
+ aria-label="Search plugins, skills, agents and looks" data-store-search>
 <kbd aria-hidden="true">/</kbd>
 </div>
 <div class="tabs" role="tablist" aria-label="Kind">
@@ -651,7 +671,7 @@ your GitHub name.</p>
     return layout(
         title=f"Marketplace — {PRODUCT}",
         description=(
-            f"Plugins, skills and agents for {PRODUCT}, published by the community. "
+            f"Plugins, skills, agents and looks for {PRODUCT}, published by the community. "
             "Read every file before you install."
         ),
         path="",
@@ -686,6 +706,25 @@ def _reach(entry: dict) -> str:
         if auth:
             blocks.append(f'<p class="label">Sign-in method</p><p class="value">{esc(auth)}</p>')
         heading = "Where your data goes"
+    elif entry["kind"] == "look":
+        look = entry["source"]
+        blocks.append(
+            '<p class="label">A look can only draw. It runs in a sandboxed frame with no '
+            "network, no access to the app or your data, no cookies and no storage. It gets "
+            "nothing but the voice state and the volume.</p>"
+        )
+        for label, key in (("License", "license"), ("Credits", "attribution")):
+            value = _readable(look.get(key))
+            if value:
+                blocks.append(f'<p class="label">{label}</p><p class="value">{esc(value)}</p>')
+        digest = str(look.get("sha256") or "")
+        if re.fullmatch(r"[0-9a-f]{64}", digest):
+            blocks.append(
+                '<p class="label">Archive SHA-256, checked again by the app before it '
+                f'unpacks anything</p><div class="terminal terminal--plain"><code>{esc(digest)}'
+                "</code></div>"
+            )
+        heading = "What it can do"
     elif entry["kind"] == "agent":
         template = entry["source"].get("agent")
         template = template if isinstance(template, dict) else {}
@@ -711,11 +750,13 @@ def _reach(entry: dict) -> str:
     return f'<section class="section"><h2>{heading}</h2>{"".join(blocks)}</section>'
 
 
-def _file(item: dict, *, opened: bool) -> str:
+def _file(item: dict, *, opened: bool, archived: bool = False) -> str:
     path = str(item.get("path") or "")
     text = item.get("text")
     size = item.get("size") if isinstance(item.get("size"), int) else 0
-    if not isinstance(text, str):
+    if not isinstance(text, str) and archived:
+        body = "<pre>Inside the archive. Download it to read this file.</pre>"
+    elif not isinstance(text, str):
         body = "<pre>Not shown: this file is not text, or is too large to embed.</pre>"
     elif path.lower().endswith((".md", ".markdown")):
         frontmatter, prose = split_frontmatter(text)
@@ -747,7 +788,12 @@ def entry_page(entry: dict) -> str:
         else ""
     )
 
-    installs = "".join(
+    installs = (
+        f'<p class="note">Open Marketplace in the {PRODUCT} app, find “{esc(entry["title"])}” '
+        "under Looks and press Install. Then pick it as your look in Settings.</p>"
+        if kind == "look"
+        else ""
+    ) + "".join(
         f'<p class="label">{esc(heading)}</p>'
         f'<div class="terminal"><code>{esc(command)}</code>'
         f'<button class="copy" type="button" data-copy="{esc(command)}">Copy</button></div>'
@@ -760,6 +806,8 @@ def entry_page(entry: dict) -> str:
         facts.append(("Version", entry["version"]))
     if entry["published_at"]:
         facts.append(("Published", format_date(entry["published_at"])))
+    if kind == "look" and isinstance(source.get("size_bytes"), int):
+        facts.append(("Download", f"{source['size_bytes'] / (1024 * 1024):.1f} MB"))
     if entry["categories"]:
         labels = [c.replace("-", " ").replace("_", " ").capitalize() for c in entry["categories"]]
         facts.append(("Category", ", ".join(labels)))
@@ -773,12 +821,25 @@ def entry_page(entry: dict) -> str:
 
     files = [item for item in source.get("files") or [] if isinstance(item, dict)]
     files_html = (
-        "".join(_file(item, opened=position == 0) for position, item in enumerate(files))
+        "".join(
+            _file(
+                item,
+                opened=position == 0 and isinstance(item.get("text"), str),
+                archived=kind == "look",
+            )
+            for position, item in enumerate(files)
+        )
         or '<p class="note">This entry publishes no readable files.</p>'
     )
+    archive = str(source.get("archive_url") or "") if kind == "look" else ""
+    if archive.startswith("https://github.com/"):
+        files_html = (
+            f'<p class="note"><a class="link" href="{esc(archive)}" rel="noopener">'
+            "Download the archive</a> to read every file before you install it.</p>"
+        ) + files_html
     source_link = (
         f'<p class="note"><a class="link" href="{esc(entry["source_url"])}" rel="noopener">'
-        "Open the source on GitHub</a></p>"
+        f"{'Open the source' if kind == 'look' else 'Open the source on GitHub'}</a></p>"
         if entry["source_url"].startswith("https://")
         else ""
     )
@@ -786,6 +847,13 @@ def entry_page(entry: dict) -> str:
         f'<p class="lead">{esc(entry["description"])}</p>'
         if entry["description"]
         else '<p class="lead lead--missing">No description yet.</p>'
+    )
+
+    preview_html = (
+        f'<figure class="look-preview"><img src="{esc(entry["preview_url"])}" '
+        f'alt="Preview of {esc(entry["title"])}" loading="lazy"></figure>'
+        if kind == "look" and entry.get("preview_url")
+        else ""
     )
 
     body = f"""<nav class="crumbs" aria-label="Breadcrumb">
@@ -801,6 +869,7 @@ def entry_page(entry: dict) -> str:
 </div>
 </header>
 {lead}
+{preview_html}
 {facts_html}
 <section class="section">
 <h2>Install</h2>

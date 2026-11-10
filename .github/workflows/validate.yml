@@ -57,6 +57,14 @@ jobs:
       # so what it may NOT carry (accounts, paths, approval bypasses) is pinned.
       - name: Agent template rules regression test
         run: python scripts/test_agents.py
+      # A look is a zip from a stranger's release that the app unpacks. The
+      # registry reads it in memory with the app's own rules; those rules,
+      # the pinned digest and the feed shape the app reads are pinned here.
+      # Pillow lets the test cover the preview re-encode too.
+      - name: Install the image toolchain
+        run: pip install "Pillow==11.3.0"
+      - name: Look rules regression test
+        run: python scripts/test_looks.py
       # The issue intake publishes with no human in the loop; the publisher
       # must be the issue's author, never what the JSON claims.
       - name: Issue intake regression test
@@ -84,5 +92,8 @@ jobs:
             git fetch origin "${GITHUB_BASE_REF}"
             python scripts/validate.py --base-ref "origin/${GITHUB_BASE_REF}"
           else
-            python scripts/validate.py
+            # On main every look archive was downloaded and checked when it
+            # merged; a release that disappears later must not turn main red
+            # (the publish build simply stops listing it).
+            python scripts/validate.py --no-fetch
           fi

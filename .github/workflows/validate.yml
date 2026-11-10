@@ -61,6 +61,14 @@ jobs:
       # must be the issue's author, never what the JSON claims.
       - name: Issue intake regression test
         run: python scripts/test_intake.py
+      # The storefront prints what strangers published. Nothing from the feed
+      # may reach a page as markup, and a listing text that says nothing has
+      # to fall back to the skill's own description.
+      - name: Storefront and listing text regression test
+        run: python scripts/test_site.py
+      # The storefront has to build from what is published right now.
+      - name: Build the feed and the storefront
+        run: python scripts/build_index.py --out _site
       # The upload endpoint and the app read rules.json instead of retyping
       # the limits. A stale copy would let them accept what CI rejects.
       - name: Published rules match the validator

@@ -147,6 +147,7 @@ def main() -> int:
             "agents/release-captain/index.html",
             "assets/store.css",
             "assets/store.js",
+            "assets/publish.js",
             "sitemap.xml",
         ):
             check(f"{path} is written", (out / path).is_file())
@@ -155,6 +156,7 @@ def main() -> int:
         plugin = (out / "plugins/todo-fox/index.html").read_text(encoding="utf-8")
         skill = (out / "skills/brief/index.html").read_text(encoding="utf-8")
         agent = (out / "agents/release-captain/index.html").read_text(encoding="utf-8")
+        publish = (out / "publish/index.html").read_text(encoding="utf-8")
 
         # --- nothing from the feed is markup -------------------------------
         for name, page in (("home", home), ("plugin", plugin), ("skill", skill)):
@@ -170,6 +172,16 @@ def main() -> int:
         check("a javascript link keeps its words only", "javascript:alert(1)" not in skill)
         check("a trap link still shows its label", "a trap" in skill)
         check("a non-https source address is not linked", "javascript:alert(4)" not in skill)
+
+        # --- publishing ------------------------------------------------------
+        check("the store has a Publish button", '<a class="button" href="publish/">Publish</a>' in home)
+        check("every page has Publish in its nav", 'nav__publish" href="../../publish/">Publish</a>' in skill)
+        check("the publish page is a form", "data-publish-form" in publish)
+        check("the form has a Publish button", 'type="submit">Publish</button>' in publish)
+        check("the form knows where the registry is", 'data-registry="https://github.com/' in publish)
+        check("the publish page loads its script", 'src="../assets/publish.js"' in publish)
+        check("only the publish page loads it", "publish.js" not in home and "publish.js" not in skill)
+        check("without JavaScript it says how to publish by hand", "<noscript>" in publish)
 
         # --- what a page carries --------------------------------------------
         check("the store links every entry", 'href="skills/brief/"' in home)

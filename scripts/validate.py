@@ -13,6 +13,11 @@ Usage:
 With --base-ref, a submission that already exists at that git ref must keep
 its publisher and strictly increase its version (the anti-hijack rule).
 
+A look (kind=look) is the one kind checked over the network: its archive is
+downloaded from the GitHub release it names, hashed, and read in memory as a
+zip. That happens only for a look this change adds or edits (an unchanged
+file at --base-ref is not fetched again), and ``--no-fetch`` turns it off.
+
 Ownership is keyed on ``publisher_id`` — the numeric GitHub account id —
 whenever the existing entry carries one. GitHub logins can be renamed, and
 the freed name can then be claimed by anyone, who would inherit every entry
@@ -23,15 +28,25 @@ field fall back to the login comparison until their next update.
 from __future__ import annotations
 
 import argparse
+import hashlib
+import hmac
+import io
 import json
 import re
+import stat
 import subprocess
 import sys
+import urllib.error
+import urllib.request
+import zipfile
 from pathlib import Path
+from urllib.parse import urlsplit
 
 ROOT = Path(__file__).resolve().parent.parent
 EXTENSION_NAMESPACE = "io.github.personaljarvis"
 PLUGIN_SCHEMA = "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json"
+
+KINDS = ("plugin", "skill", "agent", "look")
 
 MAX_FILE_BYTES = 128 * 1024
 MAX_SKILL_BYTES = 64 * 1024
@@ -766,6 +781,435 @@ def validate_agent(doc: dict, name: str, errors: Errors, path: Path) -> None:
     reject_http_urls(doc, "submission", errors, path)
 
 
+# ---------------------------------------------------------------------------
+# kind=look — a visual that takes the voice orb's place
+# ---------------------------------------------------------------------------
+#
+# A look is a folder pack (look.json + an HTML entry page + a preview + the
+# files the page loads: scripts, Three.js, .glb models). Packs are too large
+# to live in this repository, so the publisher hosts the zip as a GitHub
+# release asset and the submission pins its SHA-256. This check downloads the
+# archive as DATA, recomputes the digest, and reads the zip in memory with the
+# same rules the app applies when it installs it. Nothing is unpacked to disk
+# and nothing in the pack is executed.
+#
+# Keep in sync with the app: dodaios/ui/looks/manifest.py (format, id,
+# version, license, file kinds, limits), dodaios/ui/looks/loader.py (pack
+# files), dodaios/ui/looks/install.py (archive rules, ALLOWED_HOSTS,
+# MAX_ARCHIVE_BYTES) and CommunityLookEntry in
+# dodaios/marketplace/community_source.py (the feed entry).
+
+LOOK_FORMAT = "dodaios-look/1"
+LOOK_ID_RE = re.compile(r"^[a-z0-9][a-z0-9-]{1,47}$")
+# manifest.RESERVED_IDS: "orb" is the built-in voice orb.
+RESERVED_LOOK_IDS = frozenset({"orb", "none", "default"})
+# The looks the app ships (dodaios/ui/looks/builtin/). A built-in look wins
+# over an installed one, and the app refuses to install over it.
+BUILTIN_LOOK_IDS = frozenset({"pulse-ring"})
+_LOOK_SEGMENT = r"[A-Za-z0-9_][A-Za-z0-9_.-]{0,63}"
+LOOK_REL_PATH_RE = re.compile(rf"^(?:{_LOOK_SEGMENT}/){{0,4}}{_LOOK_SEGMENT}$")
+LOOK_VERSION_RE = re.compile(r"^\d{1,4}\.\d{1,4}\.\d{1,4}$")
+LOOK_LICENSE_RE = re.compile(r"^[A-Za-z0-9.+-]{2,40}(?: (?:AND|OR) [A-Za-z0-9.+-]{2,40}){0,3}$")
+# manifest.ALLOWED_TYPES, by lowercase suffix.
+LOOK_ALLOWED_SUFFIXES = (
+    ".html", ".js", ".mjs", ".css", ".json", ".txt", ".md",
+    ".png", ".jpg", ".jpeg", ".webp", ".svg",
+    ".glb", ".gltf", ".bin", ".ktx2", ".hdr", ".woff2", ".wasm",
+)
+LOOK_PREVIEW_SUFFIXES = (".png", ".jpg", ".jpeg", ".webp", ".svg")
+MAX_LOOK_PACK_BYTES = 25 * 1024 * 1024
+MAX_LOOK_PACK_FILES = 300
+MAX_LOOK_MANIFEST_BYTES = 16 * 1024
+# install.MAX_ARCHIVE_BYTES: the pack limit plus slack for the zip's headers.
+MAX_LOOK_ARCHIVE_BYTES = MAX_LOOK_PACK_BYTES + 2 * 1024 * 1024
+MAX_LOOK_TITLE_CHARS = 40  # manifest MAX_NAME_CHARS
+MAX_LOOK_DESCRIPTION_CHARS = 200  # manifest MAX_DESCRIPTION_CHARS
+MAX_LOOK_AUTHOR_CHARS = 60
+MAX_LOOK_ATTRIBUTION_CHARS = 200
+MAX_LOOK_HOMEPAGE_CHARS = 200
+MAX_LOOK_URL_CHARS = 400
+SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
+# A GitHub release asset, and nothing else: the one place a publisher can host
+# a 25 MB zip that the app's ALLOWED_HOSTS also covers.
+LOOK_ARCHIVE_URL_RE = re.compile(
+    r"^https://github\.com/[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})/[A-Za-z0-9._-]{1,100}"
+    r"/releases/download/[A-Za-z0-9._+-]{1,128}/[A-Za-z0-9._-]{1,128}\.zip$"
+)
+# Where a release download may go. github.com answers with a redirect to one
+# of the two asset hosts; any other hop is refused before it is followed.
+LOOK_DOWNLOAD_HOSTS = frozenset(
+    {"github.com", "objects.githubusercontent.com", "release-assets.githubusercontent.com"}
+)
+LOOK_KEYS = frozenset(
+    {
+        "kind", "name", "publisher", "publisher_id", "version", "title", "description",
+        "license", "attribution", "source_url", "archive_url", "sha256",
+    }
+)
+# "Jarvis" is another company's trademark; no look may be listed under it.
+TRADEMARK_RE = re.compile(r"jarvis", re.IGNORECASE)
+# The bytes each preview format starts with. The app does not look; the
+# registry does, so a preview that is not the picture it claims is refused
+# here instead of turning into a listing without a picture.
+_PREVIEW_MAGIC = {
+    ".png": (b"\x89PNG\r\n\x1a\n",),
+    ".jpg": (b"\xff\xd8\xff",),
+    ".jpeg": (b"\xff\xd8\xff",),
+}
+
+#: Download archives while validating. ``--no-fetch`` turns it off for the
+#: push-to-main run, where every archive was already checked at merge time.
+FETCH_ARCHIVES = True
+
+
+class LookError(ValueError):
+    """A look archive or its look.json breaks a rule; the message says which."""
+
+
+def look_path_ok(value: object) -> bool:
+    """manifest.is_safe_rel_path: a relative pack path such as ``assets/a.glb``."""
+    if not isinstance(value, str) or not LOOK_REL_PATH_RE.match(value):
+        return False
+    return all(part not in {".", ".."} for part in value.split("/"))
+
+
+def look_suffix(rel_path: str) -> str:
+    dot = rel_path.rfind(".")
+    return rel_path[dot:].lower() if dot > rel_path.rfind("/") else ""
+
+
+def _plain_text(value: object, where: str, limit: int, *, required: bool) -> str:
+    """manifest._text: stripped text, bounded, without control characters."""
+    if value is None:
+        value = ""
+    if not isinstance(value, str):
+        raise LookError(f"{where} must be text")
+    value = value.strip()
+    if required and not value:
+        raise LookError(f"{where} is required")
+    if len(value) > limit:
+        raise LookError(f"{where} is longer than {limit} characters")
+    if any(ord(ch) < 32 for ch in value):
+        raise LookError(f"{where} contains control characters")
+    return value
+
+
+class _GitHubOnlyRedirects(urllib.request.HTTPRedirectHandler):
+    """Follow a redirect only while it stays on https and a GitHub asset host."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):  # noqa: N802
+        if not _download_url_ok(newurl):
+            raise LookError(f"the download was redirected off GitHub ({urlsplit(newurl).hostname})")
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
+
+
+def _download_url_ok(url: str) -> bool:
+    parts = urlsplit(url)
+    return (
+        parts.scheme == "https"
+        and (parts.hostname or "").lower() in LOOK_DOWNLOAD_HOSTS
+        and not parts.username
+        and not parts.password
+        and parts.port in (None, 443)
+    )
+
+
+def fetch_look_archive(url: str) -> bytes:
+    """Download a look archive: https on GitHub only, never more than the cap.
+
+    Tests replace this function; nothing else in this file touches the network.
+    """
+    if not LOOK_ARCHIVE_URL_RE.fullmatch(url):
+        raise LookError("archive_url is not a GitHub release asset")
+    opener = urllib.request.build_opener(_GitHubOnlyRedirects())
+    # The scheme is fixed to https by LOOK_ARCHIVE_URL_RE above.
+    request = urllib.request.Request(  # noqa: S310
+        url, headers={"User-Agent": "dodaios-marketplace-validate"}
+    )
+    try:
+        with opener.open(request, timeout=60) as response:
+            if not _download_url_ok(response.geturl()):
+                raise LookError("the download ended on a host that is not GitHub")
+            declared = response.headers.get("Content-Length")
+            if declared and declared.isdigit() and int(declared) > MAX_LOOK_ARCHIVE_BYTES:
+                raise LookError(f"the archive is larger than {MAX_LOOK_ARCHIVE_BYTES} bytes")
+            buf = io.BytesIO()
+            while chunk := response.read(64 * 1024):
+                buf.write(chunk)
+                if buf.tell() > MAX_LOOK_ARCHIVE_BYTES:
+                    raise LookError(f"the archive is larger than {MAX_LOOK_ARCHIVE_BYTES} bytes")
+            return buf.getvalue()
+    except (urllib.error.URLError, TimeoutError, OSError) as exc:
+        raise LookError(f"the archive could not be downloaded: {exc}") from exc
+
+
+def _zip_members(archive: zipfile.ZipFile) -> dict[str, zipfile.ZipInfo]:
+    """install._members + loader.check_pack_files, on the zip's own listing.
+
+    Returns pack path -> ZipInfo. The pack sits at the zip's root or inside
+    one top folder, exactly as the app accepts it.
+    """
+    infos = [info for info in archive.infolist() if not info.is_dir()]
+    if not infos:
+        raise LookError("the archive is empty")
+    if len(infos) > MAX_LOOK_PACK_FILES:
+        raise LookError(f"a look may hold at most {MAX_LOOK_PACK_FILES} files")
+    names = [info.filename.replace("\\", "/") for info in infos]
+    tops = {name.split("/", 1)[0] for name in names}
+    strip = ""
+    if len(tops) == 1 and all("/" in name for name in names):
+        strip = next(iter(tops)) + "/"
+
+    total = 0
+    members: dict[str, zipfile.ZipInfo] = {}
+    folded: set[str] = set()
+    for info, name in zip(infos, names, strict=True):
+        mode = (info.external_attr >> 16) & 0xFFFF
+        if mode and stat.S_ISLNK(mode):
+            raise LookError(f"the archive contains a link: {name}")
+        if info.flag_bits & 0x1:
+            raise LookError("the archive is encrypted")
+        rel = name[len(strip):] if strip else name
+        if not look_path_ok(rel):
+            raise LookError(f"the archive contains a file name that is not allowed: {name}")
+        if look_suffix(rel) not in LOOK_ALLOWED_SUFFIXES:
+            raise LookError(f"the file kind of {rel!r} is not allowed in a look")
+        # Stricter than the app, which would crash on these while unpacking:
+        # the same path twice, or two paths that collide on a case-insensitive
+        # disk (Windows, macOS).
+        if rel.lower() in folded:
+            raise LookError(f"the archive holds {rel!r} twice (names are compared ignoring case)")
+        folded.add(rel.lower())
+        total += info.file_size
+        if total > MAX_LOOK_PACK_BYTES:
+            mb = MAX_LOOK_PACK_BYTES // (1024 * 1024)
+            raise LookError(f"a look may be at most {mb} MB unpacked")
+        members[rel] = info
+    # A file whose path is also another file's folder cannot be unpacked.
+    for rel in members:
+        parts = rel.lower().split("/")
+        for depth in range(1, len(parts)):
+            if "/".join(parts[:depth]) in folded:
+                raise LookError(f"{rel!r} sits inside a path that is also a file")
+    return members
+
+
+def _read_member(archive: zipfile.ZipFile, info: zipfile.ZipInfo) -> bytes:
+    """One member's bytes, never more than its header claims (CRC checked)."""
+    buf = io.BytesIO()
+    with archive.open(info) as src:
+        while chunk := src.read(64 * 1024):
+            buf.write(chunk)
+            # The header's size is a claim; the stream is the truth.
+            if buf.tell() > info.file_size:
+                raise LookError("the archive's sizes do not match its contents")
+    return buf.getvalue()
+
+
+def parse_look_manifest(data: object) -> dict:
+    """manifest.parse_manifest: the checked look.json fields, or LookError."""
+    if not isinstance(data, dict):
+        raise LookError("look.json must hold one JSON object")
+    if data.get("format") != LOOK_FORMAT:
+        raise LookError(f'look.json must say "format": "{LOOK_FORMAT}"')
+    look_id = data.get("id")
+    if not isinstance(look_id, str) or not LOOK_ID_RE.match(look_id):
+        raise LookError(
+            "look.json id must be 2 to 48 lowercase letters, digits or dashes, "
+            "starting with a letter or digit"
+        )
+    if look_id in RESERVED_LOOK_IDS:
+        raise LookError(f"the look id {look_id!r} is reserved")
+    version = _plain_text(data.get("version", ""), "look.json version", 14, required=True)
+    if not LOOK_VERSION_RE.match(version):
+        raise LookError("look.json version must look like 1.0.0")
+    license_id = _plain_text(data.get("license", ""), "look.json license", 120, required=True)
+    if not LOOK_LICENSE_RE.match(license_id):
+        raise LookError("look.json license must be an SPDX license id such as Apache-2.0")
+    entry = data.get("entry", "index.html")
+    if not look_path_ok(entry) or look_suffix(entry) != ".html":
+        raise LookError("look.json entry must be a relative path to an .html file in the pack")
+    preview = data.get("preview")
+    if not look_path_ok(preview) or look_suffix(preview) not in LOOK_PREVIEW_SUFFIXES:
+        raise LookError(
+            "look.json preview must be a relative path to a .png, .jpg, .webp or .svg file"
+        )
+    homepage = _plain_text(data.get("homepage"), "look.json homepage", MAX_LOOK_HOMEPAGE_CHARS,
+                           required=False)
+    if homepage and not homepage.startswith("https://"):
+        raise LookError("look.json homepage must start with https://")
+    return {
+        "id": look_id,
+        "name": _plain_text(
+            data.get("name"), "look.json name", MAX_LOOK_TITLE_CHARS, required=True
+        ),
+        "description": _plain_text(data.get("description"), "look.json description",
+                                   MAX_LOOK_DESCRIPTION_CHARS, required=False),
+        "author": _plain_text(data.get("author"), "look.json author", MAX_LOOK_AUTHOR_CHARS,
+                              required=True),
+        "version": version,
+        "license": license_id,
+        "entry": entry,
+        "preview": preview,
+        "attribution": _plain_text(data.get("attribution"), "look.json attribution",
+                                   MAX_LOOK_ATTRIBUTION_CHARS, required=False),
+        "homepage": homepage,
+    }
+
+
+def read_look_pack(data: bytes) -> dict:
+    """Check a downloaded archive as a look pack, in memory, without trusting it.
+
+    Every member is decompressed (and its CRC checked) but never written
+    anywhere. Returns ``{"manifest", "files", "preview_bytes"}`` where
+    ``files`` is the pack's ``[{path, size}]`` listing.
+    """
+    try:
+        archive = zipfile.ZipFile(io.BytesIO(data))
+    except (zipfile.BadZipFile, ValueError) as exc:
+        raise LookError("the archive is not a valid zip file") from exc
+    with archive:
+        members = _zip_members(archive)
+        contents: dict[str, bytes] = {}
+        try:
+            for rel, info in members.items():
+                contents[rel] = _read_member(archive, info)
+        except (zipfile.BadZipFile, zipfile.LargeZipFile, NotImplementedError, OSError,
+                EOFError, RuntimeError) as exc:
+            # RuntimeError: an encrypted member zipfile notices only now.
+            raise LookError(f"the archive could not be read: {exc}") from exc
+
+    raw = contents.get("look.json")
+    if raw is None:
+        raise LookError("the pack has no look.json")
+    if len(raw) > MAX_LOOK_MANIFEST_BYTES:
+        raise LookError("look.json is too large")
+    try:
+        decoded = json.loads(raw.decode("utf-8-sig"))
+    except (UnicodeDecodeError, ValueError) as exc:
+        raise LookError("look.json could not be read as JSON") from exc
+    manifest = parse_look_manifest(decoded)
+    for rel in (manifest["entry"], manifest["preview"]):
+        if rel not in contents:
+            raise LookError(f"the pack has no file {rel!r}")
+    preview_bytes = contents[manifest["preview"]]
+    suffix = look_suffix(manifest["preview"])
+    magic = _PREVIEW_MAGIC.get(suffix)
+    if magic and not preview_bytes.startswith(magic):
+        raise LookError(
+            f"the preview {manifest['preview']!r} is not a {suffix[1:].upper()} picture"
+        )
+    if suffix == ".webp" and not (preview_bytes[:4] == b"RIFF" and preview_bytes[8:12] == b"WEBP"):
+        raise LookError(f"the preview {manifest['preview']!r} is not a WEBP picture")
+    files = sorted(
+        ({"path": rel, "size": len(body)} for rel, body in contents.items()),
+        key=lambda f: (f["path"].count("/"), f["path"]),
+    )
+    return {"manifest": manifest, "files": files, "preview_bytes": preview_bytes}
+
+
+def check_look_archive(doc: dict) -> dict:
+    """Download the submission's archive and check it against the submission.
+
+    Returns what :func:`read_look_pack` returns plus ``size_bytes``; raises
+    LookError with the first problem.
+    """
+    data = fetch_look_archive(doc["archive_url"])
+    digest = hashlib.sha256(data).hexdigest()
+    if not hmac.compare_digest(digest, doc["sha256"]):
+        raise LookError(
+            f"the archive's SHA-256 is {digest}, not the submitted {doc['sha256']} — "
+            "recompute it from the file you uploaded to the release"
+        )
+    pack = read_look_pack(data)
+    manifest = pack["manifest"]
+    if manifest["id"] != doc["name"]:
+        raise LookError(
+            f"look.json id {manifest['id']!r} must equal the submission name {doc['name']!r}"
+        )
+    if manifest["version"] != doc["version"]:
+        raise LookError(
+            f"look.json version {manifest['version']!r} must equal the submission version "
+            f"{doc['version']!r}"
+        )
+    if manifest["license"] != doc["license"]:
+        raise LookError(
+            f"look.json license {manifest['license']!r} must equal the submission license "
+            f"{doc['license']!r}"
+        )
+    if TRADEMARK_RE.search(manifest["name"]):
+        raise LookError("look.json name may not contain 'Jarvis' (a trademark of another company)")
+    pack["size_bytes"] = len(data)
+    return pack
+
+
+def validate_look(doc: dict, name: str, errors: Errors, path: Path, *, fetch: bool) -> None:
+    before = len(errors.items)
+    for key in doc:
+        if key not in LOOK_KEYS:
+            errors.add(path, f"{key} is not a look submission field")
+    if not LOOK_ID_RE.fullmatch(name):
+        errors.add(path, "a look name must be 2 to 48 lowercase letters, digits or dashes")
+    if name in RESERVED_LOOK_IDS:
+        errors.add(path, f"{name!r} is reserved (the app's own orb setting)")
+    if name in BUILTIN_LOOK_IDS:
+        errors.add(path, f"{name!r} is a look the app ships — reserved")
+    if TRADEMARK_RE.search(name):
+        errors.add(path, "a look name may not contain 'jarvis' (a trademark of another company)")
+
+    for key, limit, required in (
+        ("title", MAX_LOOK_TITLE_CHARS, True),
+        ("description", MAX_LOOK_DESCRIPTION_CHARS, True),
+        ("attribution", MAX_LOOK_ATTRIBUTION_CHARS, False),
+    ):
+        try:
+            value = _plain_text(doc.get(key), key, limit, required=required)
+        except LookError as exc:
+            errors.add(path, f"{exc} (kind=look)")
+            continue
+        if key == "title" and TRADEMARK_RE.search(value):
+            errors.add(
+                path, "a look title may not contain 'Jarvis' (a trademark of another company)"
+            )
+
+    version = doc.get("version")
+    if isinstance(version, str) and not LOOK_VERSION_RE.fullmatch(version):
+        errors.add(path, "a look version must be MAJOR.MINOR.PATCH with at most 4 digits each")
+    license_id = doc.get("license")
+    if not isinstance(license_id, str) or not LOOK_LICENSE_RE.fullmatch(license_id):
+        errors.add(path, "license must be an SPDX id such as Apache-2.0, or 'A AND B'")
+    source_url = doc.get("source_url")
+    if (
+        not isinstance(source_url, str)
+        or not source_url.startswith("https://")
+        or len(source_url) > MAX_LOOK_URL_CHARS
+        or any(ch.isspace() or ord(ch) < 32 for ch in source_url)
+    ):
+        errors.add(path, "source_url must be an https:// link to the look's source")
+    archive_url = doc.get("archive_url")
+    if not isinstance(archive_url, str) or not LOOK_ARCHIVE_URL_RE.fullmatch(archive_url):
+        errors.add(
+            path,
+            "archive_url must be a GitHub release asset: "
+            "https://github.com/<owner>/<repo>/releases/download/<tag>/<file>.zip",
+        )
+    sha256 = doc.get("sha256")
+    if not isinstance(sha256, str) or not SHA256_RE.fullmatch(sha256):
+        errors.add(path, "sha256 must be the archive's SHA-256 as 64 lowercase hex digits")
+    reject_http_urls(doc, "submission", errors, path)
+
+    # The download is the expensive half; it runs only on a submission that is
+    # otherwise sound.
+    if not fetch or len(errors.items) > before:
+        return
+    if not isinstance(version, str) or not SEMVER_RE.fullmatch(version):
+        return
+    try:
+        check_look_archive(doc)
+    except LookError as exc:
+        errors.add(path, f"archive: {exc}")
+
+
 def read_base_version(path: Path, base_ref: str) -> dict | None:
     """The submission as it exists at base_ref, or None when new."""
     rel = path.resolve().relative_to(ROOT).as_posix()
@@ -829,8 +1273,8 @@ def validate_file(path: Path, errors: Errors, base_ref: str | None) -> None:
     if path.name != f"{name}.json":
         errors.add(path, f"file must be named {name}.json")
     kind = doc.get("kind")
-    if kind not in ("plugin", "skill", "agent"):
-        errors.add(path, "kind must be 'plugin', 'skill' or 'agent'")
+    if kind not in KINDS:
+        errors.add(path, "kind must be 'plugin', 'skill', 'agent' or 'look'")
         return
     if kind == "plugin" and name in RESERVED_PLUGIN_IDS:
         errors.add(path, f"{name!r} is a built-in Personal Jarvis plugin id — reserved")
@@ -851,6 +1295,12 @@ def validate_file(path: Path, errors: Errors, base_ref: str | None) -> None:
         validate_plugin(doc, name, errors, path)
     elif kind == "agent":
         validate_agent(doc, name, errors, path)
+    elif kind == "look":
+        # The archive is downloaded only for a submission this change adds or
+        # edits. The workflow validates the whole catalogue on every PR, and
+        # an unchanged look was checked when it was merged.
+        unchanged = bool(base_ref) and read_base_version(path, base_ref) == doc
+        validate_look(doc, name, errors, path, fetch=FETCH_ARCHIVES and not unchanged)
     else:
         validate_skill(doc, name, errors, path)
 
@@ -897,7 +1347,14 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("files", nargs="*", help="submission files (default: submissions/*.json)")
     parser.add_argument("--base-ref", default=None, help="git ref for ownership/version checks")
+    parser.add_argument(
+        "--no-fetch",
+        action="store_true",
+        help="do not download look archives (they were checked when they were merged)",
+    )
     args = parser.parse_args()
+    global FETCH_ARCHIVES
+    FETCH_ARCHIVES = not args.no_fetch
 
     files = [Path(f) for f in args.files] or sorted((ROOT / "submissions").glob("*.json"))
     errors = Errors()

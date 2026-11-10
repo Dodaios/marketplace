@@ -4,7 +4,10 @@
 Output (default ``_site/``):
 - ``index.json``  — the single feed the Dodaios app fetches (community
   plugins with embedded manifests, skills with their text and raw download
-  URLs, and agent templates with the template embedded).
+  URLs, agent templates with the template embedded, and looks: the pinned
+  archive's address, digest and size, plus the re-encoded preview).
+- ``looks/<name>/preview-<sha12>.png`` — each look's preview, served from
+  this site (expand.py re-encoded it once per archive).
 - ``rules.json``  — the generated submission rules, published so the upload
   endpoint and the app can read the limits instead of retyping them
   (scripts/export_rules.py).
@@ -14,7 +17,7 @@ Output (default ``_site/``):
 
 Keep the wire shape in sync with dodaios/marketplace/community_source.py in the
 app repository (CommunityIndex / CommunityPluginEntry / CommunitySkillEntry /
-CommunityAgentEntry).
+CommunityAgentEntry / CommunityLookEntry).
 """
 
 from __future__ import annotations
@@ -23,6 +26,7 @@ import argparse
 import json
 import os
 import re
+import shutil
 import sys
 from datetime import UTC, datetime
 from pathlib import Path
@@ -40,6 +44,11 @@ REPO = os.environ.get("GITHUB_REPOSITORY", "Dodaios/marketplace")
 BRANCH = "main"
 TREE_URL = f"https://github.com/{REPO}/tree/{BRANCH}"
 RAW_URL = f"https://raw.githubusercontent.com/{REPO}/{BRANCH}"
+# Where this site itself is served from. A look's preview is linked HERE, a
+# host the app's look ALLOWED_HOSTS names (dodaios.github.io), never into the
+# repository.
+_OWNER, _, _REPO_NAME = REPO.partition("/")
+PAGES_URL = f"https://{_OWNER.lower()}.github.io/{_REPO_NAME}"
 
 
 # The two frontmatter profiles a published skill can carry. "jarvis" is the
@@ -241,6 +250,61 @@ def collect_files(entry_dir: Path) -> list[dict]:
     return files
 
 
+def look_entry(name: str, meta: dict, out: Path) -> dict | None:
+    """One ``looks`` item of the feed, or None while the look is not ready.
+
+    expand.py writes ``looks/<name>/archive.json`` once it has downloaded the
+    archive, verified the pinned digest and checked the pack. Until facts for
+    THIS digest exist (first publish still running, release gone, asset
+    swapped), the look is not listed: the app would refuse the install anyway.
+    """
+    submission_path = ROOT / "submissions" / f"{name}.json"
+    facts_path = ROOT / "looks" / name / "archive.json"
+    if not submission_path.exists() or not facts_path.exists():
+        return None
+    submission = read_json(submission_path)
+    facts = read_json(facts_path)
+    if facts.get("sha256") != submission.get("sha256"):
+        return None
+    preview_url = None
+    preview = facts.get("preview")
+    # The name carries the archive's digest, so a new archive is a new address
+    # and no cache can show the previous version's picture.
+    if preview == f"preview-{str(facts['sha256'])[:12]}.png":
+        source = ROOT / "looks" / name / preview
+        if source.is_file():
+            target = out / "looks" / name / preview
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(source, target)
+            preview_url = f"{PAGES_URL}/looks/{name}/{preview}"
+    manifest = facts.get("manifest") if isinstance(facts.get("manifest"), dict) else {}
+    return {
+        "name": name,
+        "title": submission.get("title", name),
+        "description": submission.get("description", ""),
+        "publisher": meta.get("publisher"),
+        # See the plugin branch: the stable half of the identity.
+        "publisher_id": meta.get("publisher_id"),
+        "featured": False,
+        "version": meta.get("version"),
+        "published_at": meta.get("published_at"),
+        "license": submission.get("license"),
+        "attribution": submission.get("attribution") or manifest.get("attribution") or "",
+        "source_url": submission.get("source_url"),
+        "archive_url": submission.get("archive_url"),
+        "sha256": facts["sha256"],
+        "size_bytes": facts.get("size_bytes"),
+        "preview_url": preview_url,
+        # What the pack holds, path and size. The storefront lists it; the
+        # bytes stay in the publisher's release.
+        "files": [
+            {"path": f.get("path"), "size": f.get("size"), "text": None}
+            for f in facts.get("files") or []
+            if isinstance(f, dict)
+        ],
+    }
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--out", default="_site")
@@ -252,7 +316,7 @@ def main() -> int:
     if registry_path.exists():
         registry = read_json(registry_path)
 
-    plugins, skills, agents = [], [], []
+    plugins, skills, agents, looks = [], [], [], []
     for name, meta in sorted(registry.items()):
         if meta.get("kind") == "plugin":
             plugin_dir = ROOT / "plugins" / name
@@ -348,6 +412,11 @@ def main() -> int:
                 }
             )
 
+        elif meta.get("kind") == "look":
+            entry = look_entry(name, meta, out)
+            if entry is not None:
+                looks.append(entry)
+
     index = {
         # Monotonic enough for cache-busting: the workflow run number, or a
         # timestamp when built locally.
@@ -357,6 +426,7 @@ def main() -> int:
         "plugins": plugins,
         "skills": skills,
         "agents": agents,
+        "looks": looks,
     }
 
     out.mkdir(parents=True, exist_ok=True)
@@ -383,7 +453,8 @@ def main() -> int:
 
     print(
         f"index: {len(plugins)} plugin(s), {len(skills)} skill(s), "
-        f"{len(agents)} agent(s) -> {out / 'index.json'}; storefront: {pages} page(s)"
+        f"{len(agents)} agent(s), {len(looks)} look(s) -> {out / 'index.json'}; "
+        f"storefront: {pages} page(s)"
     )
     return 0
 

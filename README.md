@@ -1,7 +1,7 @@
 # Dodaios Marketplace
 
 The community registry for [Dodaios](https://github.com/Dodaios/Dodaios)
-plugins, skills and **agent templates**. Anyone can publish; every submission
+plugins, skills, **agent templates** and **looks**. Anyone can publish; every submission
 that passes the automated checks is listed — there is no human review queue.
 Every entry's page shows what it reaches and every published file before
 anything is installed.
@@ -27,7 +27,7 @@ anything is installed.
 ```
 submissions/<name>.json  ──PR──►  automated checks  ──green──►  auto-merge
                                                                     │
-plugins/<name>/…  skills/<name>/SKILL.md  registry.json  ◄── expansion (bot)
+plugins/<name>/…  skills/<name>/SKILL.md  looks/<name>/…  ◄── expansion (bot)
                                                                     │
                         GitHub Pages: index.json  ◄── compile + deploy
 ```
@@ -172,6 +172,110 @@ imported figure (`avatar.model`). Instructions may not name a home folder
 whole file. Installing a template creates a new agent on the installer's own
 model with the app's default permissions; `require_approval` can only add
 confirmations, never remove them.
+
+**Look** (`kind: "look"`): a visual that takes the voice orb's place in the
+app. See [Looks](#looks) below.
+
+## Looks
+
+A look is a small web page that draws instead of the voice orb: canvas,
+WebGL or SVG, with Three.js and `.glb` models if you like. The app runs it in
+a sandboxed frame with no network, no access to the app's API, no cookies and
+no storage. It gets the voice state (`idle`, `listening`, `thinking`,
+`speaking`, …) and the microphone and voice volume, and nothing else. The
+format is described in the app repository at
+[`docs/looks.md`](https://github.com/Dodaios/Dodaios/blob/main/docs/looks.md).
+
+### Package it
+
+A look is one folder:
+
+```
+aurora-core/
+  look.json      the manifest (format "dodaios-look/1")
+  index.html     the entry page
+  preview.png    the picture the marketplace shows (.png, .jpg, .webp or .svg)
+  ...            scripts, styles, models, fonts the page loads
+```
+
+```json
+{
+  "format": "dodaios-look/1",
+  "id": "aurora-core",
+  "name": "Aurora Core",
+  "description": "A slow aurora that brightens while Dodaios talks.",
+  "author": "Octo Cat",
+  "version": "1.2.0",
+  "license": "MIT AND CC-BY-4.0",
+  "entry": "index.html",
+  "preview": "preview.png",
+  "attribution": "Core model by Example Studio, CC-BY-4.0"
+}
+```
+
+Zip the folder (the pack may sit at the zip's root or inside one top folder).
+The rules are the app's own, and CI checks every one of them:
+
+* at most 300 files and 25 MB unpacked;
+* file kinds: html, js, mjs, css, json, txt, md, png, jpg, jpeg, webp, svg,
+  glb, gltf, bin, ktx2, hdr, woff2, wasm;
+* file names use letters, digits, `_`, `.` and `-`, at most five folders
+  deep; no links, no encrypted entries, no two names that differ only in case;
+* `id` is 2–48 lowercase letters, digits and dashes and is the submission's
+  `name`; `orb`, `none`, `default` and the looks the app ships are taken;
+* `version` and `license` in `look.json` equal the submission's;
+* no name or title may contain "Jarvis" (a trademark of another company).
+
+### Publish it
+
+1. Create a release on your own GitHub repository and attach the zip as a
+   release asset. **You host the archive; this registry never stores it.**
+2. Compute its SHA-256: `sha256sum aurora-core.zip` (macOS:
+   `shasum -a 256`, Windows: `Get-FileHash aurora-core.zip`).
+3. Submit (pull request, issue, or the app) this JSON:
+
+```json
+{
+  "kind": "look",
+  "name": "aurora-core",
+  "publisher": "octocat",
+  "publisher_id": 583231,
+  "version": "1.2.0",
+  "title": "Aurora Core",
+  "description": "A slow aurora that brightens while Dodaios talks.",
+  "license": "MIT AND CC-BY-4.0",
+  "attribution": "Core model by Example Studio, CC-BY-4.0",
+  "source_url": "https://github.com/octocat/aurora-core",
+  "archive_url": "https://github.com/octocat/aurora-core/releases/download/v1.2.0/aurora-core.zip",
+  "sha256": "<64 lowercase hex digits>"
+}
+```
+
+`archive_url` must be a GitHub release asset
+(`https://github.com/<owner>/<repo>/releases/download/<tag>/<file>.zip`).
+`title` is at most 40 characters, `description` and `attribution` at most 200.
+
+### What the checks do with it
+
+* `validate.py` downloads the archive over https, following redirects only
+  while they stay on `github.com`, `objects.githubusercontent.com` or
+  `release-assets.githubusercontent.com`, and stops at 27 MB. It recomputes
+  the SHA-256, then reads the zip **in memory**: nothing is unpacked to disk
+  and nothing in it runs. Only a look that the change adds or edits is
+  downloaded; the rest of the catalogue is not fetched again.
+* On main, `expand.py` downloads it once more, checks the digest again,
+  writes the facts (size, manifest, file list) to `looks/<name>/archive.json`
+  and re-encodes the preview with Pillow into a fresh PNG of at most 512 px.
+  An SVG preview gets no picture. The site serves only that PNG, at
+  `https://dodaios.github.io/marketplace/looks/<name>/preview-<sha12>.png`.
+* `index.json` lists the look under `looks` with `archive_url`, `sha256` and
+  `size_bytes`. The app downloads the archive from your release, checks the
+  digest and the pack again, and only then unpacks it.
+
+Keep the release asset in place. If it disappears or changes, the app's
+checksum check fails, and the next publish build stops listing the look. To
+change the look, publish a new release and submit a higher `version` with the
+new `archive_url` and `sha256`.
 
 ### Bundling skills with a plugin
 

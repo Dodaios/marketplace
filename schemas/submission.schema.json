@@ -5,7 +5,7 @@
   "type": "object",
   "required": ["kind", "name", "publisher", "version"],
   "properties": {
-    "kind": { "enum": ["plugin", "skill", "agent"] },
+    "kind": { "enum": ["plugin", "skill", "agent", "look"] },
     "name": {
       "type": "string",
       "pattern": "^[a-z0-9](?:[a-z0-9.-]{0,62}[a-z0-9])?$",
@@ -59,11 +59,11 @@
       "type": ["string", "null"],
       "description": "kind=plugin: optional markdown card (frontmatter 'keywords:' line + guidance prose)"
     },
-    "title": { "type": "string", "description": "kind=skill: display title" },
+    "title": { "type": "string", "description": "kind=skill/agent/look: display title (a look: at most 40 characters, never 'Jarvis')" },
     "description": {
       "type": "string",
       "maxLength": 500,
-      "description": "kind=skill: what the skill does"
+      "description": "kind=skill/agent: what it does (at most 500 characters); kind=look: at most 200 characters"
     },
     "categories": {
       "type": "array",
@@ -105,6 +105,31 @@
         "knowledge_scope": { "enum": ["shared", "own"] },
         "avatar": { "type": "object", "description": "Figure recipe: catalog ids and #rrggbb colours only" }
       }
+    },
+    "license": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9.+-]{2,40}(?: (?:AND|OR) [A-Za-z0-9.+-]{2,40}){0,3}$",
+      "description": "kind=look: SPDX license id or expression, e.g. 'Apache-2.0' or 'MIT AND CC-BY-4.0'. Must equal look.json's license."
+    },
+    "attribution": {
+      "type": "string",
+      "maxLength": 200,
+      "description": "kind=look: optional credit line for third-party assets (models, textures, fonts)"
+    },
+    "source_url": {
+      "type": "string",
+      "pattern": "^https://",
+      "description": "kind=look: https link to the look's source (usually the GitHub repository)"
+    },
+    "archive_url": {
+      "type": "string",
+      "pattern": "^https://github\\.com/[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})/[A-Za-z0-9._-]{1,100}/releases/download/[A-Za-z0-9._+-]{1,128}/[A-Za-z0-9._-]{1,128}\\.zip$",
+      "description": "kind=look: the pack's zip, hosted as a GitHub release asset"
+    },
+    "sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$",
+      "description": "kind=look: SHA-256 of the zip, 64 lowercase hex digits. The registry and the app both check it."
     }
   },
   "allOf": [
@@ -115,6 +140,18 @@
     {
       "if": { "properties": { "kind": { "const": "plugin" } } },
       "then": { "required": ["plugin_json"] }
+    },
+    {
+      "if": { "properties": { "kind": { "const": "look" } } },
+      "then": {
+        "required": ["title", "description", "license", "source_url", "archive_url", "sha256"],
+        "properties": {
+          "name": { "pattern": "^[a-z0-9][a-z0-9-]{1,47}$" },
+          "version": { "pattern": "^\\d{1,4}\\.\\d{1,4}\\.\\d{1,4}$" },
+          "title": { "maxLength": 40 },
+          "description": { "maxLength": 200 }
+        }
+      }
     },
     {
       "if": { "properties": { "kind": { "const": "skill" } } },

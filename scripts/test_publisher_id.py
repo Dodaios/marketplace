@@ -37,7 +37,7 @@ import tempfile
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
-LANES = ("plugins", "skills", "agents")
+LANES = ("plugins", "skills", "agents", "looks")
 
 
 def load_build_index():

@@ -61,7 +61,64 @@
     "max_bundled_skills": 10,
     "max_description_chars": 500,
     "max_file_bytes": 131072,
+    "max_look_archive_bytes": 28311552,
+    "max_look_attribution_chars": 200,
+    "max_look_description_chars": 200,
+    "max_look_manifest_bytes": 16384,
+    "max_look_pack_bytes": 26214400,
+    "max_look_pack_files": 300,
+    "max_look_title_chars": 40,
     "max_skill_bytes": 65536
+  },
+  "look": {
+    "allowed_suffixes": [
+      ".html",
+      ".js",
+      ".mjs",
+      ".css",
+      ".json",
+      ".txt",
+      ".md",
+      ".png",
+      ".jpg",
+      ".jpeg",
+      ".webp",
+      ".svg",
+      ".glb",
+      ".gltf",
+      ".bin",
+      ".ktx2",
+      ".hdr",
+      ".woff2",
+      ".wasm"
+    ],
+    "download_hosts": [
+      "github.com",
+      "objects.githubusercontent.com",
+      "release-assets.githubusercontent.com"
+    ],
+    "format": "dodaios-look/1",
+    "keys": [
+      "archive_url",
+      "attribution",
+      "description",
+      "kind",
+      "license",
+      "name",
+      "publisher",
+      "publisher_id",
+      "sha256",
+      "source_url",
+      "title",
+      "version"
+    ],
+    "preview_suffixes": [
+      ".png",
+      ".jpg",
+      ".jpeg",
+      ".webp",
+      ".svg"
+    ]
   },
   "patterns": {
     "agent_name": "^[^/\\\\:@#<>\\\"'`\\x00-\\x1f]{1,40}$",
@@ -73,10 +130,16 @@
     "home_path": "(?:\\b[A-Za-z]:[\\\\/]+Users[\\\\/]+[^\\\\/\\s]+|/Users/[^/\\s]+|/home/[^/\\s]+)",
     "image_digest": "^[a-z0-9][a-z0-9._/-]*@sha256:[0-9a-f]{64}$",
     "image_tag": "^[a-z0-9][a-z0-9._/-]*:[0-9][0-9A-Za-z._-]*$",
+    "look_archive_url": "^https://github\\.com/[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})/[A-Za-z0-9._-]{1,100}/releases/download/[A-Za-z0-9._+-]{1,128}/[A-Za-z0-9._-]{1,128}\\.zip$",
+    "look_id": "^[a-z0-9][a-z0-9-]{1,47}$",
+    "look_license": "^[A-Za-z0-9.+-]{2,40}(?: (?:AND|OR) [A-Za-z0-9.+-]{2,40}){0,3}$",
+    "look_rel_path": "^(?:[A-Za-z0-9_][A-Za-z0-9_.-]{0,63}/){0,4}[A-Za-z0-9_][A-Za-z0-9_.-]{0,63}$",
+    "look_version": "^\\d{1,4}\\.\\d{1,4}\\.\\d{1,4}$",
     "name": "^[a-z0-9](?:[a-z0-9.-]{0,62}[a-z0-9])?$",
     "npm_pin": "^(?:@[a-z0-9][a-z0-9._-]*/)?[a-z0-9][a-z0-9._-]*@\\d+\\.\\d+\\.\\d+[0-9A-Za-z.+-]*$",
     "pypi_pin": "^[A-Za-z0-9][A-Za-z0-9._-]*(?:==|@)\\d+\\.\\d+\\.\\d+[0-9A-Za-z.+-]*$",
     "semver": "^\\d+\\.\\d+\\.\\d+$",
+    "sha256": "^[0-9a-f]{64}$",
     "token_literal": "[A-Za-z0-9_\\-]{20,}"
   },
   "plugin_schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
@@ -103,6 +166,12 @@
       "UV_EXTRA_INDEX_URL",
       "UV_INDEX_URL",
       "WINDIR"
+    ],
+    "look_ids": [
+      "default",
+      "none",
+      "orb",
+      "pulse-ring"
     ],
     "plugin_ids": [
       "airtable",

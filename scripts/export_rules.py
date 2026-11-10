@@ -62,6 +62,13 @@ def build_rules() -> dict:
             "max_agent_name_chars": v.MAX_AGENT_NAME_CHARS,
             "max_agent_title_chars": v.MAX_AGENT_TITLE_CHARS,
             "max_agent_capabilities": v.MAX_AGENT_CAPABILITIES,
+            "max_look_archive_bytes": v.MAX_LOOK_ARCHIVE_BYTES,
+            "max_look_pack_bytes": v.MAX_LOOK_PACK_BYTES,
+            "max_look_pack_files": v.MAX_LOOK_PACK_FILES,
+            "max_look_manifest_bytes": v.MAX_LOOK_MANIFEST_BYTES,
+            "max_look_title_chars": v.MAX_LOOK_TITLE_CHARS,
+            "max_look_description_chars": v.MAX_LOOK_DESCRIPTION_CHARS,
+            "max_look_attribution_chars": v.MAX_LOOK_ATTRIBUTION_CHARS,
         },
         "patterns": {
             "name": v.NAME_RE.pattern,
@@ -78,6 +85,21 @@ def build_rules() -> dict:
             "agent_name": v.AGENT_NAME_RE.pattern,
             "capability_id": v.CAPABILITY_ID_RE.pattern,
             "home_path": v.HOME_PATH_RE.pattern,
+            "look_id": v.LOOK_ID_RE.pattern,
+            "look_version": v.LOOK_VERSION_RE.pattern,
+            "look_license": v.LOOK_LICENSE_RE.pattern,
+            "look_archive_url": v.LOOK_ARCHIVE_URL_RE.pattern,
+            "look_rel_path": v.LOOK_REL_PATH_RE.pattern,
+            "sha256": v.SHA256_RE.pattern,
+        },
+        # kind=look: the pack format the app reads (dodaios/ui/looks/), and
+        # the hosts a release download may pass through.
+        "look": {
+            "format": v.LOOK_FORMAT,
+            "keys": sorted(v.LOOK_KEYS),
+            "allowed_suffixes": list(v.LOOK_ALLOWED_SUFFIXES),
+            "preview_suffixes": list(v.LOOK_PREVIEW_SUFFIXES),
+            "download_hosts": sorted(v.LOOK_DOWNLOAD_HOSTS),
         },
         # kind=agent: the template fields that travel, and the ones refused
         # with the reason the error message gives.
@@ -92,6 +114,7 @@ def build_rules() -> dict:
         "reserved": {
             "plugin_ids": sorted(v.RESERVED_PLUGIN_IDS),
             "skill_names": sorted(v.RESERVED_SKILL_NAMES),
+            "look_ids": sorted(v.RESERVED_LOOK_IDS | v.BUILTIN_LOOK_IDS),
             # Variables a manifest may not set: they decide what runs before
             # the plugin's own first line does.
             "env_names": sorted(v.RESERVED_ENV_NAMES),

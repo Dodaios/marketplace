@@ -1,5 +1,5 @@
 name: Publish to the marketplace
-description: Publish an agent template, a skill or a plugin — no fork or pull request needed.
+description: Publish an agent template, a skill, a plugin or a look — no fork or pull request needed.
 title: "[publish] "
 body:
   - type: markdown

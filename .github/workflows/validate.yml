@@ -66,6 +66,11 @@ jobs:
       # to fall back to the skill's own description.
       - name: Storefront and listing text regression test
         run: python scripts/test_site.py
+      # The publish page builds a submission in the browser and hands it to
+      # GitHub. Its logic runs here in Node, against the real intake and
+      # validator, so the two halves cannot drift apart.
+      - name: Publish page regression test
+        run: python scripts/test_publish_flow.py
       # The storefront has to build from what is published right now.
       - name: Build the feed and the storefront
         run: python scripts/build_index.py --out _site

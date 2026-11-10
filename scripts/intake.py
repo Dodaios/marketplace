@@ -119,7 +119,7 @@ def gh(*args: str) -> None:
 
 
 def install_line(doc: dict) -> str:
-    return f"jarvis marketplace install {doc['name']}"
+    return f"dodaios marketplace install {doc['name']}"
 
 
 def answer(repo: str, number: int, body: str) -> None:

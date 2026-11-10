@@ -484,10 +484,13 @@ def install_commands(entry: dict) -> list[tuple[str, str, str]]:
 # ----------------------------------------------------------------------------
 
 
-def layout(*, title: str, description: str, path: str, depth: int, body: str) -> str:
+def layout(
+    *, title: str, description: str, path: str, depth: int, body: str, scripts: tuple[str, ...] = ()
+) -> str:
     """One whole document. ``depth`` is how many folders ``path`` sits below
     the store's root, so links stay relative and the site works at any address."""
     up = "../" * depth
+    extra = "".join(f'<script src="{up}assets/{name}" defer></script>\n' for name in scripts)
     canonical = STORE_URL + path
     return f"""<!doctype html>
 <html lang="en">
@@ -519,6 +522,7 @@ def layout(*, title: str, description: str, path: str, depth: int, body: str) ->
 </nav>
 <div class="nav__actions">
 <a class="nav__github" href="{APP_REPO_URL}" aria-label="{PRODUCT} on GitHub">{SVG_GITHUB}</a>
+<a class="button button--quiet nav__publish" href="{up}publish/">Publish</a>
 <a class="button" href="{SITE_URL}/#install">Get {PRODUCT}</a>
 </div>
 </div>
@@ -538,7 +542,7 @@ def layout(*, title: str, description: str, path: str, depth: int, body: str) ->
 </div>
 </footer>
 <script src="{up}assets/store.js" defer></script>
-</body>
+{extra}</body>
 </html>
 """
 
@@ -620,10 +624,10 @@ ready to connect.</p>
 <section class="invite">
 <div class="invite__text">
 <h2>Publish yours</h2>
-<p>Share a plugin, a skill or an agent under your GitHub name. It goes live as soon as the
-automated checks pass.</p>
+<p>Drop your file, press Publish, confirm on GitHub. It is live a minute or two later, under
+your GitHub name.</p>
 </div>
-<a class="button" href="publish/">How publishing works</a>
+<a class="button" href="publish/">Publish</a>
 </section>"""
     return layout(
         title=f"Marketplace — {PRODUCT}",
@@ -805,42 +809,119 @@ checks. Nobody reviewed it by hand. The files below are exactly what gets instal
 
 
 def publish_page() -> str:
+    """The page that publishes.
+
+    A form, not a manual: drop a file, check the listing, press Publish. The
+    page builds the submission in the browser (site/publish.js) and hands it
+    to GitHub as a filled-in issue, where the visitor signs in and confirms.
+    Without JavaScript the form cannot build anything, so the page then says
+    how to publish by hand.
+    """
+    issue_form = f"{REGISTRY_URL}/issues/new?template=publish.yml"
+    kinds = "".join(
+        f'<button class="tab" type="button" role="tab" data-kind="{kind}" '
+        f'aria-selected="{"true" if kind == "skill" else "false"}">{KIND_LABEL[kind]}</button>'
+        for kind in ("skill", "plugin", "agent")
+    )
     body = f"""<nav class="crumbs" aria-label="Breadcrumb">
 <a href="../">Marketplace</a><span aria-hidden="true">/</span>
 <span aria-current="page">Publish</span>
 </nav>
 <header class="entry__head"><div>
-<h1>Publish yours</h1>
+<h1>Publish</h1>
 </div></header>
-<p class="lead">Anyone can publish a plugin, a skill or an agent. There is no review queue:
-what passes the automated checks is listed within minutes, under your GitHub name.</p>
+<p class="lead">Drop your file, check the listing, press Publish. GitHub asks you to sign in
+and confirm, and your entry is live a minute or two later.</p>
+
+<noscript>
+<p class="notice">This form needs JavaScript. Without it, open a
+<a class="link" href="{issue_form}">publish issue</a> on GitHub and paste your submission
+there.</p>
+</noscript>
+
+<form class="publish" data-publish-form novalidate
+ data-registry="{REGISTRY_URL}" data-api="https://api.github.com/repos/Dodaios/marketplace">
+
 <section class="section">
-<h2>From the app</h2>
-<ol class="steps">
-<li><div><strong>Open Marketplace and press Publish yours</strong>
-<span>The publishing window opens inside {PRODUCT}. Nothing is uploaded until the last
-step.</span></div></li>
-<li><div><strong>Sign in with GitHub</strong>
-<span>The sign-in only proves who you are. It asks for no permissions on your
-account.</span></div></li>
-<li><div><strong>Add your package</strong>
-<span>Drop a folder or a single SKILL.md, import a public repository, or write a skill in
-the form. To share an agent, open it and press Share.</span></div></li>
-<li><div><strong>Check, then publish</strong>
-<span>The same rules the registry enforces run on your machine first. On green, the entry
-appears here and in every {PRODUCT} app.</span></div></li>
-</ol>
+<h2>What are you publishing?</h2>
+<div class="tabs tabs--left" role="tablist" aria-label="Kind">{kinds}</div>
+
+<div class="drop" data-drop>
+<strong data-drop-title>Drop your SKILL.md here</strong>
+<span data-drop-hint>A Markdown file with the instructions. Plain text is fine too.</span>
+<span class="drop__actions">
+<button class="button button--quiet" type="button" data-open="file">Choose a file</button>
+<button class="button button--quiet" type="button" data-open="folder">Choose a folder</button>
+</span>
+<input type="file" data-pick="file" multiple hidden
+ accept=".md,.markdown,.txt,.json,text/markdown,application/json">
+<input type="file" data-pick="folder" multiple webkitdirectory hidden>
+</div>
+<p class="loaded" data-loaded hidden>
+<span>Loaded <strong data-loaded-name></strong></span>
+<button class="copy" type="button" data-clear>Remove</button>
+</p>
+<label class="field" data-write>
+<span class="field__label">Or write the instructions here</span>
+<textarea name="text" rows="7" spellcheck="false"
+ placeholder="# My skill&#10;&#10;When asked to …, do this:"></textarea>
+</label>
+<p class="problem" data-problem="file" role="alert" hidden></p>
 </section>
+
 <section class="section">
-<h2>Without the app</h2>
-<p>Open a <a class="link" href="{REGISTRY_URL}/issues/new?template=publish.yml">publish
-issue</a> on the registry and paste your submission, or send a pull request that adds one
-<code>submissions/&lt;name&gt;.json</code>. The
-<a class="link" href="{REGISTRY_URL}#submission-format">submission format</a> is in the
-registry README.</p>
+<h2>How it is listed</h2>
+<div class="fields">
+<label class="field" data-row-title>
+<span class="field__label">Title</span>
+<input name="title" type="text" maxlength="80" autocomplete="off" placeholder="Three Bullet Brief">
+<span class="problem" data-problem="title" role="alert" hidden></span>
+</label>
+<label class="field">
+<span class="field__label">Name</span>
+<input name="name" type="text" maxlength="64" autocomplete="off" spellcheck="false"
+ placeholder="three-bullet-brief">
+<span class="field__hint"><code data-install-line>dodaios marketplace install your-name</code></span>
+<span class="problem" data-problem="name" role="alert" hidden></span>
+</label>
+<label class="field field--narrow">
+<span class="field__label">Version</span>
+<input name="version" type="text" maxlength="20" autocomplete="off" spellcheck="false"
+ value="1.0.0">
+<span class="problem" data-problem="version" role="alert" hidden></span>
+</label>
+<label class="field field--wide">
+<span class="field__label">Description <span class="field__count"><span data-count>0</span>/500</span></span>
+<textarea name="description" rows="3" maxlength="600"
+ placeholder="One or two sentences on what it does."></textarea>
+<span class="problem" data-problem="description" role="alert" hidden></span>
+</label>
+<label class="field field--wide" data-row-categories>
+<span class="field__label">Categories <span class="field__count">optional</span></span>
+<input name="categories" type="text" autocomplete="off" placeholder="writing, research">
+</label>
+</div>
 </section>
+
+<section class="section publish__go">
+<button class="button button--large" type="submit">Publish</button>
+<p class="note">GitHub opens with your submission filled in. Sign in if it asks, then press
+Create. Your GitHub name becomes the publisher.</p>
+</section>
+</form>
+
+<section class="status" data-publish-status hidden aria-live="polite">
+<p class="status__text" data-status-text></p>
+<p class="status__paste" data-paste-help hidden>This one is too large to fill in for you. On
+GitHub, click into the Submission field, paste, and press Create.
+<button class="copy" type="button" data-copy="" data-copied="Copied">Copy again</button></p>
+<a class="link" data-status-link href="{REGISTRY_URL}" target="_blank" rel="noopener" hidden></a>
+</section>
+
 <section class="section">
 <h2>What the checks enforce</h2>
+<p>There is no review queue. Whatever passes these checks is listed, and everybody can read
+every file of it before they install.</p>
 <ol class="steps">
 <li><div><strong>The first publisher owns the name</strong>
 <span>Updates are accepted only from the same GitHub account, and the version has to go
@@ -851,17 +932,20 @@ machine.</span></div></li>
 <li><div><strong>Addresses are https, and commands are pinned</strong>
 <span>A plugin that runs locally has to start through npx, uvx or docker with an exact
 package version.</span></div></li>
-<li><div><strong>Every file stays readable</strong>
-<span>Size limits keep a package small enough that a visitor can read all of it before
-installing.</span></div></li>
 </ol>
+<p class="note">You can also publish from inside the {PRODUCT} app (Marketplace, then Publish
+yours), or with a <a class="link" href="{REGISTRY_URL}#submission-format">pull request</a>.</p>
 </section>"""
     return layout(
         title=f"Publish to the Marketplace — {PRODUCT}",
-        description=f"How to publish a plugin, a skill or an agent to the {PRODUCT} marketplace.",
+        description=(
+            f"Publish a plugin, a skill or an agent to the {PRODUCT} marketplace: drop your "
+            "file, press Publish, confirm on GitHub."
+        ),
         path="publish/",
         depth=1,
         body=body,
+        scripts=("publish.js",),
     )
 
 
@@ -879,7 +963,7 @@ def build(index: dict, out: Path) -> int:
 
     assets = out / "assets"
     assets.mkdir(parents=True, exist_ok=True)
-    for name in ("store.css", "store.js"):
+    for name in ("store.css", "store.js", "publish.js"):
         shutil.copyfile(ASSETS / name, assets / name)
 
     urls = "".join(f"<url><loc>{esc(STORE_URL + path)}</loc></url>" for path in pages)

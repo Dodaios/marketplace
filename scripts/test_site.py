@@ -179,7 +179,18 @@ def main() -> int:
         check("the publish page is a form", "data-publish-form" in publish)
         check("the form has a Publish button", 'type="submit">Publish</button>' in publish)
         check("the form knows where the registry is", 'data-registry="https://github.com/' in publish)
-        check("the publish page loads its script", 'src="../assets/publish.js"' in publish)
+        check("the publish page loads its script", 'src="../assets/publish.js?v=' in publish)
+        check("the publish page is one small window", 'class="pubwin"' in publish)
+        check("it takes a file or a folder", "data-drop" in publish and "webkitdirectory" in publish)
+        check(
+            "it asks for a name and a description",
+            'name="title"' in publish and 'name="description"' in publish,
+        )
+        check("it carries no manual", "<ol" not in publish and "<h2" not in publish)
+        check(
+            "a changed stylesheet gets a new address",
+            'href="assets/store.css?v=' in home and 'href="../assets/store.css?v=' in publish,
+        )
         check("only the publish page loads it", "publish.js" not in home and "publish.js" not in skill)
         check("without JavaScript it says how to publish by hand", "<noscript>" in publish)
 

@@ -24,6 +24,7 @@ Stdlib only, like every script in this repository.
 
 from __future__ import annotations
 
+import hashlib
 import html
 import json
 import re
@@ -86,6 +87,12 @@ _GITHUB_PATH = (
     "653.24 2.873.12 3.176.765.84 1.23 1.91 1.23 3.22 0 4.61-2.805 5.625-5.475 5.92.42.36"
     ".81 1.096.81 2.22 0 1.606-.015 2.896-.015 3.286 0 .315.21.69.825.57C20.565 22.092 24"
     " 17.592 24 12.297c0-6.627-5.373-12-12-12"
+)
+SVG_UPLOAD = (
+    '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" '
+    'stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">'
+    '<path d="M12 16V4"/><path d="m7 9 5-5 5 5"/>'
+    '<path d="M4 16v3a1 1 0 0 0 1 1h14a1 1 0 0 0 1-1v-3"/></svg>'
 )
 SVG_GITHUB = (
     '<svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">'
@@ -484,13 +491,25 @@ def install_commands(entry: dict) -> list[tuple[str, str, str]]:
 # ----------------------------------------------------------------------------
 
 
+def asset(name: str) -> str:
+    """An asset's file name with a fingerprint of its content.
+
+    The host lets browsers keep a stylesheet for hours. Without the
+    fingerprint a visitor gets a new page drawn with the old styles.
+    """
+    digest = hashlib.sha256((ASSETS / name).read_bytes()).hexdigest()[:10]
+    return f"{name}?v={digest}"
+
+
 def layout(
     *, title: str, description: str, path: str, depth: int, body: str, scripts: tuple[str, ...] = ()
 ) -> str:
     """One whole document. ``depth`` is how many folders ``path`` sits below
     the store's root, so links stay relative and the site works at any address."""
     up = "../" * depth
-    extra = "".join(f'<script src="{up}assets/{name}" defer></script>\n' for name in scripts)
+    extra = "".join(
+        f'<script src="{up}assets/{asset(name)}" defer></script>\n' for name in scripts
+    )
     canonical = STORE_URL + path
     return f"""<!doctype html>
 <html lang="en">
@@ -506,7 +525,7 @@ def layout(
 <meta property="og:description" content="{esc(description)}">
 <meta property="og:type" content="website">
 <meta property="og:url" content="{esc(canonical)}">
-<link rel="stylesheet" href="{up}assets/store.css">
+<link rel="stylesheet" href="{up}assets/{asset("store.css")}">
 </head>
 <body>
 <header class="nav">
@@ -541,7 +560,7 @@ def layout(
 </nav>
 </div>
 </footer>
-<script src="{up}assets/store.js" defer></script>
+<script src="{up}assets/{asset("store.js")}" defer></script>
 {extra}</body>
 </html>
 """
@@ -809,132 +828,88 @@ checks. Nobody reviewed it by hand. The files below are exactly what gets instal
 
 
 def publish_page() -> str:
-    """The page that publishes.
+    """The page that publishes: one small window.
 
-    A form, not a manual: drop a file, check the listing, press Publish. The
-    page builds the submission in the browser (site/publish.js) and hands it
-    to GitHub as a filled-in issue, where the visitor signs in and confirms.
-    Without JavaScript the form cannot build anything, so the page then says
-    how to publish by hand.
+    Drop a file or a folder, give it a name and a description, press Publish.
+    The page works out what was dropped and packs the submission in the
+    browser (site/publish.js), then hands it to GitHub as a filled-in issue,
+    where the visitor signs in and confirms. Without JavaScript the window
+    cannot pack anything, so the page then says how to publish by hand.
     """
     issue_form = f"{REGISTRY_URL}/issues/new?template=publish.yml"
-    kinds = "".join(
-        f'<button class="tab" type="button" role="tab" data-kind="{kind}" '
-        f'aria-selected="{"true" if kind == "skill" else "false"}">{KIND_LABEL[kind]}</button>'
-        for kind in ("skill", "plugin", "agent")
-    )
-    body = f"""<nav class="crumbs" aria-label="Breadcrumb">
-<a href="../">Marketplace</a><span aria-hidden="true">/</span>
-<span aria-current="page">Publish</span>
-</nav>
-<header class="entry__head"><div>
+    body = f"""<section class="pubwin">
 <h1>Publish</h1>
-</div></header>
-<p class="lead">Drop your file, check the listing, press Publish. GitHub asks you to sign in
-and confirm, and your entry is live a minute or two later.</p>
 
 <noscript>
-<p class="notice">This form needs JavaScript. Without it, open a
+<p class="notice">This needs JavaScript. Without it, open a
 <a class="link" href="{issue_form}">publish issue</a> on GitHub and paste your submission
 there.</p>
 </noscript>
 
-<form class="publish" data-publish-form novalidate
+<form class="pubcard" data-publish-form novalidate
  data-registry="{REGISTRY_URL}" data-api="https://api.github.com/repos/Dodaios/marketplace">
 
-<section class="section">
-<h2>What are you publishing?</h2>
-<div class="tabs tabs--left" role="tablist" aria-label="Kind">{kinds}</div>
-
 <div class="drop" data-drop>
-<strong data-drop-title>Drop your SKILL.md here</strong>
-<span data-drop-hint>A Markdown file with the instructions. Plain text is fine too.</span>
+{SVG_UPLOAD}
+<strong>Drop a file or folder</strong>
+<span class="drop__hint">A skill, a plugin or an agent</span>
 <span class="drop__actions">
-<button class="button button--quiet" type="button" data-open="file">Choose a file</button>
-<button class="button button--quiet" type="button" data-open="folder">Choose a folder</button>
+<button class="button button--quiet" type="button" data-open="file">Choose file</button>
+<button class="button button--quiet" type="button" data-open="folder">Choose folder</button>
 </span>
 <input type="file" data-pick="file" multiple hidden
  accept=".md,.markdown,.txt,.json,text/markdown,application/json">
 <input type="file" data-pick="folder" multiple webkitdirectory hidden>
 </div>
-<p class="loaded" data-loaded hidden>
-<span>Loaded <strong data-loaded-name></strong></span>
-<button class="copy" type="button" data-clear>Remove</button>
-</p>
-<label class="field" data-write>
-<span class="field__label">Or write the instructions here</span>
-<textarea name="text" rows="7" spellcheck="false"
- placeholder="# My skill&#10;&#10;When asked to …, do this:"></textarea>
-</label>
-<p class="problem" data-problem="file" role="alert" hidden></p>
-</section>
 
-<section class="section">
-<h2>How it is listed</h2>
-<div class="fields">
+<div class="pack" data-loaded hidden>
+<span class="mark" data-pack-mark aria-hidden="true"></span>
+<span class="pack__text">
+<strong data-pack-title></strong>
+<span data-pack-meta></span>
+</span>
+<button class="pack__remove" type="button" data-clear aria-label="Remove">&times;</button>
+</div>
+<p class="problem" data-problem="file" role="alert" hidden></p>
+
 <label class="field" data-row-title>
-<span class="field__label">Title</span>
-<input name="title" type="text" maxlength="80" autocomplete="off" placeholder="Three Bullet Brief">
+<span class="field__label">Name</span>
+<input name="title" type="text" maxlength="80" autocomplete="off">
 <span class="problem" data-problem="title" role="alert" hidden></span>
 </label>
+
 <label class="field">
-<span class="field__label">Name</span>
-<input name="name" type="text" maxlength="64" autocomplete="off" spellcheck="false"
- placeholder="three-bullet-brief">
-<span class="field__hint"><code data-install-line>dodaios marketplace install your-name</code></span>
+<span class="field__label">Description</span>
+<textarea name="description" rows="3" maxlength="500"></textarea>
+<span class="problem" data-problem="description" role="alert" hidden></span>
+</label>
+
+<details class="more" data-more>
+<summary>More options</summary>
+<div class="more__fields">
+<label class="field">
+<span class="field__label">ID</span>
+<input name="name" type="text" maxlength="64" autocomplete="off" spellcheck="false">
 <span class="problem" data-problem="name" role="alert" hidden></span>
 </label>
-<label class="field field--narrow">
+<label class="field">
 <span class="field__label">Version</span>
 <input name="version" type="text" maxlength="20" autocomplete="off" spellcheck="false"
  value="1.0.0">
 <span class="problem" data-problem="version" role="alert" hidden></span>
 </label>
-<label class="field field--wide">
-<span class="field__label">Description <span class="field__count"><span data-count>0</span>/500</span></span>
-<textarea name="description" rows="3" maxlength="600"
- placeholder="One or two sentences on what it does."></textarea>
-<span class="problem" data-problem="description" role="alert" hidden></span>
-</label>
-<label class="field field--wide" data-row-categories>
-<span class="field__label">Categories <span class="field__count">optional</span></span>
-<input name="categories" type="text" autocomplete="off" placeholder="writing, research">
-</label>
 </div>
-</section>
+</details>
 
-<section class="section publish__go">
 <button class="button button--large" type="submit">Publish</button>
-<p class="note">GitHub opens with your submission filled in. Sign in if it asks, then press
-Create. Your GitHub name becomes the publisher.</p>
-</section>
-</form>
 
-<section class="status" data-publish-status hidden aria-live="polite">
+<div class="status" data-publish-status hidden aria-live="polite">
 <p class="status__text" data-status-text></p>
-<p class="status__paste" data-paste-help hidden>This one is too large to fill in for you. On
-GitHub, click into the Submission field, paste, and press Create.
+<p class="status__paste" data-paste-help hidden>Paste it into the Submission field.
 <button class="copy" type="button" data-copy="" data-copied="Copied">Copy again</button></p>
 <a class="link" data-status-link href="{REGISTRY_URL}" target="_blank" rel="noopener" hidden></a>
-</section>
-
-<section class="section">
-<h2>What the checks enforce</h2>
-<p>There is no review queue. Whatever passes these checks is listed, and everybody can read
-every file of it before they install.</p>
-<ol class="steps">
-<li><div><strong>The first publisher owns the name</strong>
-<span>Updates are accepted only from the same GitHub account, and the version has to go
-up.</span></div></li>
-<li><div><strong>No credentials in any file</strong>
-<span>Tokens are placeholders that the installing person fills in on their own
-machine.</span></div></li>
-<li><div><strong>Addresses are https, and commands are pinned</strong>
-<span>A plugin that runs locally has to start through npx, uvx or docker with an exact
-package version.</span></div></li>
-</ol>
-<p class="note">You can also publish from inside the {PRODUCT} app (Marketplace, then Publish
-yours), or with a <a class="link" href="{REGISTRY_URL}#submission-format">pull request</a>.</p>
+</div>
+</form>
 </section>"""
     return layout(
         title=f"Publish to the Marketplace — {PRODUCT}",

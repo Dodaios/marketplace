@@ -77,6 +77,18 @@ const plugin = p.draftFromFiles([
 out.pluginKind = plugin.kind;
 out.pluginFields = plugin.fields;
 out.pluginSkills = (plugin.parts.skills || []).map((s) => s.name);
+out.pluginFiles = plugin.files;
+out.droppedFiles = dropped.files;
+
+const taken = { kind: "skill", version: "1.2.0", publisher: "octocat" };
+out.versions = {
+  fresh: p.nextVersion("", null),
+  fromFile: p.nextVersion("2.1.0", null),
+  update: p.nextVersion("", taken),
+  staleFile: p.nextVersion("1.0.0", taken),
+  aheadFile: p.nextVersion("2.0.0", taken),
+};
+out.marks = ["Three Bullet Brief", "brief", "release-captain", ""].map((t) => [p.monogram(t), p.nameHue(t)]);
 
 const context = {
   rules: { reserved: { plugin_ids: ["sentry"], skill_names: [] }, secret_patterns: ["ghp_[A-Za-z0-9]{20,}"] },
@@ -182,6 +194,27 @@ def main() -> int:
     check("a folder with plugin.json is a plugin", out["pluginKind"] == "plugin")
     check("the plugin's title comes from its manifest", out["pluginFields"]["title"] == "TodoFox")
     check("bundled skills travel with the plugin", out["pluginSkills"] == ["triage"])
+
+    # --- what the window shows as packed ----------------------------------
+    check("a dropped skill packs its one file", out["droppedFiles"] == ["demo/SKILL.md"])
+    check(
+        "a plugin folder packs every file it publishes",
+        out["pluginFiles"] == ["fox/plugin.json", "fox/mcp.json", "fox/skills/triage/SKILL.md"],
+    )
+    site = load("build_site")
+    titles = ["Three Bullet Brief", "brief", "release-captain", ""]
+    check(
+        "the packed mark is the one the store draws",
+        out["marks"] == [[site.monogram(t), site.name_hue(t)] for t in titles],
+    )
+
+    # --- the version nobody has to type -------------------------------------
+    versions = out["versions"]
+    check("a new entry starts at 1.0.0", versions["fresh"] == "1.0.0")
+    check("the file's own version is kept", versions["fromFile"] == "2.1.0")
+    check("an update goes one patch above what is published", versions["update"] == "1.2.1")
+    check("a file version that is not above is raised", versions["staleFile"] == "1.2.1")
+    check("a file version that is above is kept", versions["aheadFile"] == "2.0.0")
 
     # --- the handoff ---------------------------------------------------------
     handoff = out["droppedHandoff"]

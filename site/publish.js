@@ -169,7 +169,8 @@
    * is a plugin, a bare agent template is an agent.
    */
   function draftFromFiles(files, preferredKind) {
-    var draft = { kind: preferredKind || "skill", fields: {}, parts: {}, problem: null };
+    /* `files` on the draft is what goes into the package, by path. */
+    var draft = { kind: preferredKind || "skill", fields: {}, parts: {}, files: [], problem: null };
     var byName = {};
     files.forEach(function (file) {
       byName[baseName(file.path)] = file;
@@ -179,7 +180,10 @@
     files.forEach(function (file) {
       if (ready || !/\.json$/i.test(file.path)) return;
       var doc = parseJson(file.text);
-      if (doc && KINDS.indexOf(doc.kind) !== -1 && typeof doc.name === "string") ready = doc;
+      if (doc && KINDS.indexOf(doc.kind) !== -1 && typeof doc.name === "string") {
+        ready = doc;
+        draft.files = [file.path];
+      }
     });
     if (ready) {
       draft.kind = ready.kind;
@@ -202,6 +206,7 @@
       }
       draft.kind = "plugin";
       draft.parts = { plugin_json: plugin };
+      draft.files = [byName["plugin.json"].path];
       if (byName["mcp.json"]) {
         var mcp = parseJson(byName["mcp.json"].text);
         if (!mcp) {
@@ -209,12 +214,19 @@
           return draft;
         }
         draft.parts.mcp_json = mcp;
+        draft.files.push(byName["mcp.json"].path);
       }
-      if (byName["usage-card.md"]) draft.parts.usage_card = byName["usage-card.md"].text;
+      if (byName["usage-card.md"]) {
+        draft.parts.usage_card = byName["usage-card.md"].text;
+        draft.files.push(byName["usage-card.md"].path);
+      }
       var bundled = [];
       files.forEach(function (file) {
         var hit = /(?:^|[\\/])skills[\\/]([^\\/]+)[\\/]skill\.md$/i.exec(file.path);
-        if (hit) bundled.push({ name: hit[1], skill_md: file.text });
+        if (hit) {
+          bundled.push({ name: hit[1], skill_md: file.text });
+          draft.files.push(file.path);
+        }
       });
       if (bundled.length) draft.parts.skills = bundled;
       draft.fields = {
@@ -236,6 +248,7 @@
       var skill = readSkill(markdown.text);
       draft.kind = "skill";
       draft.parts = { skill_md: markdown.text };
+      draft.files = [markdown.path];
       draft.fields = {
         name: skill.name || slug(baseName(markdown.path).replace(/\.[^.]+$/, "").replace(/^skill$/, "")),
         version: skill.version,
@@ -250,7 +263,10 @@
     files.forEach(function (file) {
       if (template || !/\.json$/i.test(file.path)) return;
       var doc = parseJson(file.text);
-      if (doc && typeof doc.instructions === "string" && typeof doc.name === "string") template = doc;
+      if (doc && typeof doc.instructions === "string" && typeof doc.name === "string") {
+        template = doc;
+        draft.files = [file.path];
+      }
     });
     if (template) {
       draft.kind = "agent";
@@ -266,8 +282,35 @@
     }
 
     draft.problem =
-      "That is not something this page can publish. Drop a SKILL.md, a plugin folder with a plugin.json, or an agent file exported from the app.";
+      "This cannot be published. Drop a SKILL.md, a plugin folder with a plugin.json, or an agent file exported from the app.";
     return draft;
+  }
+
+  /** Up to two letters that stand for a title: "Three Bullet Brief" is "TB". */
+  function monogram(title) {
+    var words = String(title || "").trim().split(/[\s._-]+/).filter(Boolean);
+    if (!words.length) return "?";
+    return (words[0].charAt(0) + (words.length > 1 ? words[1].charAt(0) : "")).toUpperCase();
+  }
+
+  /** The hue that belongs to a name: the same number the store draws it with. */
+  function nameHue(name) {
+    var value = 0;
+    Array.from(String(name || "")).forEach(function (char) {
+      value = (value * 31 + char.codePointAt(0)) % 360;
+    });
+    return Math.round(value / 30) * 30;
+  }
+
+  /**
+   * The version to publish `name` as, when the person did not choose one:
+   * what the file says, or 1.0.0, or one patch above what is published.
+   */
+  function nextVersion(fromFile, taken) {
+    var base = SEMVER_RE.test(fromFile || "") ? fromFile : "1.0.0";
+    if (!taken || !SEMVER_RE.test(taken.version || "") || versionAbove(base, taken.version)) return base;
+    var parts = versionTuple(taken.version);
+    return parts[0] + "." + parts[1] + "." + (parts[2] + 1);
   }
 
   // ------------------------------------------------------------ submission
@@ -362,13 +405,13 @@
     var name = submission.name;
     var kind = submission.kind;
 
-    if (!name) add("name", "Give it a name.");
+    if (!name) add("name", "Give it an ID.");
     else if (!NAME_RE.test(name) || name.indexOf("--") !== -1 || name.indexOf("..") !== -1) {
       add("name", "Use lowercase letters, digits, hyphens and dots only, starting and ending with a letter or digit.");
     } else if (kind === "plugin" && (reserved.plugin_ids || []).indexOf(name) !== -1) {
-      add("name", "This name belongs to a plugin that ships with the app. Pick another.");
+      add("name", "This ID belongs to a plugin that ships with the app. Pick another.");
     } else if (kind === "skill" && (reserved.skill_names || []).indexOf(name) !== -1) {
-      add("name", "This name belongs to a skill that ships with the app. Pick another.");
+      add("name", "This ID belongs to a skill that ships with the app. Pick another.");
     }
 
     if (!SEMVER_RE.test(submission.version || "")) add("version", "Use three numbers, like 1.0.0.");
@@ -376,12 +419,12 @@
     var taken = name ? published[name] : null;
     if (taken) {
       if (taken.kind !== kind) {
-        add("name", "This name is already a published " + taken.kind + ". Pick another.");
+        add("name", "This ID is already a published " + taken.kind + ". Pick another.");
       } else if (SEMVER_RE.test(submission.version || "") && !versionAbove(submission.version, taken.version)) {
         add(
           "version",
-          "This name is published as " + taken.version + " by @" + taken.publisher +
-            ". If that is you, raise the version. If not, pick another name.",
+          "This ID is published as " + taken.version + " by @" + taken.publisher +
+            ". If that is you, raise the version. If not, pick another ID.",
         );
       }
     }
@@ -392,11 +435,11 @@
       add("description", "Keep the description under " + (limits.max_description_chars || 500) + " characters.");
     }
 
-    if (kind !== "plugin" && !String(submission.title || "").trim()) add("title", "Give it a title.");
+    if (kind !== "plugin" && !String(submission.title || "").trim()) add("title", "Give it a name.");
 
     if (kind === "skill") {
       var body = splitFrontmatter(submission.skill_md || "").body;
-      if (!body.trim()) add("file", "Add the skill's instructions: drop a SKILL.md or write them.");
+      if (!body.trim()) add("file", "Drop a SKILL.md with the skill's instructions in it.");
       else if (byteLength(submission.skill_md) > (limits.max_skill_bytes || 65536)) {
         add("file", "The SKILL.md is larger than the registry accepts.");
       }
@@ -488,6 +531,9 @@
     readSkill: readSkill,
     normalizeSkill: normalizeSkill,
     draftFromFiles: draftFromFiles,
+    monogram: monogram,
+    nameHue: nameHue,
+    nextVersion: nextVersion,
     buildSubmission: buildSubmission,
     publishedNames: publishedNames,
     problemsOf: problemsOf,
@@ -511,6 +557,7 @@
   var REGISTRY = form.getAttribute("data-registry");
   var API = form.getAttribute("data-api");
   var WATCH_KEY = "dodaios-publish-watch";
+  var KIND_LABEL = { skill: "Skill", plugin: "Plugin", agent: "Agent" };
   var $ = function (selector) {
     return form.querySelector(selector);
   };
@@ -519,17 +566,24 @@
     version: $("[name=version]"),
     title: $("[name=title]"),
     description: $("[name=description]"),
-    categories: $("[name=categories]"),
-    text: $("[name=text]"),
   };
-  var state = { kind: "skill", parts: {}, origin: "", nameTouched: false, tried: false };
+  /*
+   * `origin` is what was dropped, `files` what of it is packed. The ID and the
+   * version follow the name and the feed until the person types their own.
+   */
+  var state = {
+    kind: "skill",
+    parts: {},
+    origin: "",
+    files: [],
+    categories: "",
+    fileVersion: "",
+    dropProblem: "",
+    nameTouched: false,
+    versionTouched: false,
+    tried: false,
+  };
   var context = { rules: {}, published: {} };
-
-  var DROP_COPY = {
-    skill: ["Drop your SKILL.md here", "A Markdown file with the instructions. Plain text is fine too."],
-    plugin: ["Drop your plugin folder here", "The folder with plugin.json, and mcp.json if it has a server."],
-    agent: ["Drop your agent file here", "In the app, open the agent and press Share to export it."],
-  };
 
   function fetchJson(url) {
     return fetch(url, { cache: "no-store" }).then(function (response) {
@@ -544,6 +598,7 @@
   }, function () {});
   fetchJson("../index.json").then(function (index) {
     context.published = publishedNames(index);
+    follow();
     render();
   }, function () {});
 
@@ -553,31 +608,21 @@
       version: input.version.value,
       title: input.title.value,
       description: input.description.value,
-      categories: input.categories.value,
+      categories: state.categories,
     };
   }
 
-  function currentParts() {
-    if (state.kind === "skill" && !state.parts.skill_md && input.text.value.trim()) {
-      return { skill_md: input.text.value };
-    }
-    return state.parts;
-  }
-
   function submission() {
-    return buildSubmission(state.kind, fields(), currentParts());
+    return buildSubmission(state.kind, fields(), state.parts);
   }
 
-  function setKind(kind) {
-    state.kind = kind;
-    form.querySelectorAll("[data-kind]").forEach(function (tab) {
-      tab.setAttribute("aria-selected", tab.getAttribute("data-kind") === kind ? "true" : "false");
-    });
-    $("[data-drop-title]").textContent = DROP_COPY[kind][0];
-    $("[data-drop-hint]").textContent = DROP_COPY[kind][1];
-    $("[data-write]").hidden = kind !== "skill" || Boolean(state.parts.skill_md);
-    $("[data-row-title]").hidden = kind === "plugin";
-    $("[data-row-categories]").hidden = kind === "plugin";
+  /** Keep the ID and the version in step with the name, until they are typed. */
+  function follow() {
+    if (!state.nameTouched) input.name.value = slug(input.title.value);
+    if (!state.versionTouched) {
+      var taken = context.published[input.name.value.trim()];
+      input.version.value = nextVersion(state.fileVersion, taken && taken.kind === state.kind ? taken : null);
+    }
   }
 
   function render() {
@@ -586,44 +631,63 @@
     problems.forEach(function (problem) {
       if (!byField[problem.field]) byField[problem.field] = problem.message;
     });
+    if (!state.origin) byField.file = "Drop a file or folder first.";
     form.querySelectorAll("[data-problem]").forEach(function (slot) {
-      var message = state.tried ? byField[slot.getAttribute("data-problem")] : "";
+      var field = slot.getAttribute("data-problem");
+      var message = state.tried ? byField[field] : "";
+      /* What was wrong with a drop is said at once, not after a Publish. */
+      if (field === "file" && state.dropProblem) message = state.dropProblem;
       slot.textContent = message || "";
       slot.hidden = !message;
     });
-    $("[data-install-line]").textContent =
-      "dodaios marketplace install " + (input.name.value.trim() || "your-name");
-    $("[data-count]").textContent = String(input.description.value.length);
-    var loaded = $("[data-loaded]");
-    loaded.hidden = !state.origin;
-    $("[data-loaded-name]").textContent = state.origin;
-    $("[data-drop]").hidden = Boolean(state.origin);
-    $("[data-write]").hidden = state.kind !== "skill" || Boolean(state.origin);
-    return problems;
+    /* A problem with the ID or the version must not hide in a closed section. */
+    var named = Boolean(input.title.value.trim()) || state.kind === "plugin";
+    if (state.tried && (byField.version || (byField.name && named))) $("[data-more]").open = true;
+
+    var loaded = Boolean(state.origin);
+    $("[data-drop]").hidden = loaded;
+    $("[data-loaded]").hidden = !loaded;
+    $("[data-row-title]").hidden = state.kind === "plugin";
+    if (loaded) {
+      var title = input.title.value.trim() || input.name.value.trim() || state.origin;
+      var mark = $("[data-pack-mark]");
+      mark.textContent = monogram(title);
+      mark.style.setProperty("--h", String(nameHue(input.name.value.trim())));
+      /* A plugin has no Name field: its manifest names it, so the pack does. */
+      $("[data-pack-title]").textContent = state.kind === "plugin" ? title : state.origin;
+      var names = state.files.map(baseName);
+      var listed = names.slice(0, 3).join(", ") + (names.length > 3 ? " +" + (names.length - 3) : "");
+      /* Somebody about to update an entry should see whose it is. */
+      var taken = context.published[input.name.value.trim()];
+      var detail = taken && taken.kind === state.kind
+        ? "Update to " + input.version.value.trim() + " · published by @" + taken.publisher
+        : names.length > 1 || names[0] !== state.origin.toLowerCase() ? listed : "";
+      $("[data-pack-meta]").textContent = KIND_LABEL[state.kind] + (detail ? " · " + detail : "");
+    }
+    return problems.concat(loaded ? [] : [{ field: "file", message: byField.file }]);
   }
 
   function apply(draft, origin) {
     if (draft.problem) {
-      var slot = $("[data-problem=file]");
-      slot.textContent = draft.problem;
-      slot.hidden = false;
+      state.dropProblem = draft.problem;
+      render();
       return;
     }
+    state.dropProblem = "";
+    state.kind = draft.kind;
     state.parts = draft.parts;
+    state.files = draft.files || [];
     state.origin = origin;
+    state.categories = draft.fields.categories || "";
+    state.fileVersion = draft.fields.version || "";
     state.nameTouched = Boolean(draft.fields.name);
-    setKind(draft.kind);
-    Object.keys(draft.fields).forEach(function (key) {
-      if (input[key] && draft.fields[key]) input[key].value = draft.fields[key];
-    });
-    if (!input.version.value) input.version.value = "1.0.0";
-    var taken = context.published[input.name.value];
-    if (taken && taken.kind === draft.kind && !/[1-9]/.test(draft.fields.version || "")) {
-      /* An update: suggest the next patch version instead of failing on it. */
-      var parts = taken.version.split(".");
-      if (parts.length === 3) input.version.value = parts[0] + "." + parts[1] + "." + (parseInt(parts[2], 10) + 1);
-    }
+    state.versionTouched = false;
+    input.title.value = draft.fields.title || "";
+    input.description.value = draft.fields.description || "";
+    input.name.value = draft.fields.name || "";
+    follow();
     render();
+    (state.kind === "plugin" || input.title.value ? input.description : input.title).focus();
   }
 
   // --- reading what was dropped or chosen ----------------------------------
@@ -681,46 +745,66 @@
   function load(promise, origin) {
     promise.then(function (files) {
       files = files.filter(Boolean).slice(0, 60);
-      if (!files.length) return;
-      apply(draftFromFiles(files, state.kind), origin || baseName(files[0].path));
+      if (!files.length) {
+        apply({ problem: "Nothing in there could be read as text." }, "");
+        return;
+      }
+      apply(draftFromFiles(files, state.kind), origin || files[0].path.split(/[\\/]/).pop());
     });
   }
 
+  /* The whole page takes the drop, so nobody has to aim. */
   var drop = $("[data-drop]");
-  drop.addEventListener("dragover", function (event) {
+  var carriesFiles = function (event) {
+    var types = event.dataTransfer && event.dataTransfer.types;
+    return Boolean(types) && Array.prototype.indexOf.call(types, "Files") !== -1;
+  };
+  document.addEventListener("dragover", function (event) {
+    if (!carriesFiles(event)) return;
     event.preventDefault();
-    drop.setAttribute("data-over", "");
+    form.setAttribute("data-over", "");
   });
-  drop.addEventListener("dragleave", function () {
-    drop.removeAttribute("data-over");
+  document.addEventListener("dragleave", function (event) {
+    if (!event.relatedTarget) form.removeAttribute("data-over");
   });
-  drop.addEventListener("drop", function (event) {
+  document.addEventListener("drop", function (event) {
+    if (!carriesFiles(event)) return;
     event.preventDefault();
-    drop.removeAttribute("data-over");
+    form.removeAttribute("data-over");
+    /* Both lists are only readable while the event is being handled. */
+    var dropped = Array.prototype.slice.call(event.dataTransfer.files || []);
     var items = Array.prototype.slice.call(event.dataTransfer.items || []);
     var entries = items
       .map(function (item) {
         return item.webkitGetAsEntry ? item.webkitGetAsEntry() : null;
       })
       .filter(Boolean);
-    if (entries.length) {
-      var label = entries.length === 1 ? entries[0].name : entries.length + " files";
-      load(Promise.all(entries.map(function (entry) {
-        return walk(entry, "");
-      })).then(function (lists) {
-        return [].concat.apply([], lists);
-      }), label);
+    var plain = function () {
+      return Promise.all(dropped.map(function (file) {
+        return readFile(file);
+      }));
+    };
+    if (!entries.length) {
+      load(plain());
       return;
     }
-    var dropped = Array.prototype.slice.call(event.dataTransfer.files || []);
-    load(Promise.all(dropped.map(function (file) {
-      return readFile(file);
-    })));
+    var label = entries.length === 1 ? entries[0].name : entries.length + " files";
+    load(Promise.all(entries.map(function (entry) {
+      return walk(entry, "");
+    })).then(function (lists) {
+      var walked = [].concat.apply([], lists);
+      /* A browser that hands out entries it cannot open still has the files. */
+      return walked.length ? walked : plain();
+    }), label);
   });
   form.querySelectorAll("[data-pick]").forEach(function (picker) {
     picker.addEventListener("change", function () {
       var picked = Array.prototype.slice.call(picker.files || []);
-      var label = picked.length === 1 ? picked[0].name : picked.length + " files";
+      if (!picked.length) return;
+      var folder = picker.hasAttribute("webkitdirectory") && picked[0].webkitRelativePath;
+      var label = folder
+        ? picked[0].webkitRelativePath.split("/")[0]
+        : picked.length === 1 ? picked[0].name : picked.length + " files";
       load(Promise.all(picked.map(function (file) {
         return readFile(file);
       })), label);
@@ -728,38 +812,31 @@
     });
   });
   form.querySelectorAll("[data-open]").forEach(function (button) {
-    button.addEventListener("click", function () {
+    button.addEventListener("click", function (event) {
+      event.stopPropagation();
       $("[data-pick=" + button.getAttribute("data-open") + "]").click();
     });
   });
+  drop.addEventListener("click", function (event) {
+    if (event.target instanceof Element && event.target.closest("button, input")) return;
+    $("[data-pick=file]").click();
+  });
   $("[data-clear]").addEventListener("click", function () {
     state.parts = {};
+    state.files = [];
     state.origin = "";
+    state.fileVersion = "";
+    state.dropProblem = "";
     render();
   });
 
-  form.querySelectorAll("[data-kind]").forEach(function (tab) {
-    tab.addEventListener("click", function () {
-      setKind(tab.getAttribute("data-kind"));
-      render();
-    });
-  });
-
-  input.title.addEventListener("input", function () {
-    /* Until somebody types a name of their own, the title names the entry. */
-    if (!state.nameTouched) input.name.value = slug(input.title.value);
-  });
+  input.title.addEventListener("input", follow);
   input.name.addEventListener("input", function () {
     state.nameTouched = Boolean(input.name.value);
+    follow();
   });
-  input.text.addEventListener("input", function () {
-    if (state.nameTouched || input.title.value) return;
-    var read = readSkill(input.text.value);
-    if (read.title) {
-      input.title.value = read.title;
-      input.name.value = read.name || slug(read.title);
-    }
-    if (read.description && !input.description.value) input.description.value = read.description;
+  input.version.addEventListener("input", function () {
+    state.versionTouched = Boolean(input.version.value);
   });
   form.addEventListener("input", render);
 
@@ -799,6 +876,7 @@
         var entry = publishedNames(index)[job.name];
         if (entry && entry.version === job.version) {
           finish();
+          pasteHelp.hidden = true;
           status.setAttribute("data-state", "live");
           show(job.name + " " + job.version + " is live.", "../" + job.kind + "s/" + job.name + "/", "Open its page");
         }
@@ -813,15 +891,11 @@
         pasteHelp.hidden = true;
         if (found.state === "needs-changes") {
           status.setAttribute("data-state", "problem");
-          show(
-            "The checks found something to fix. The answer is on your submission: edit it there and the checks run again.",
-            found.url,
-            "Open your submission",
-          );
+          show("The checks found something to fix.", found.url, "See what");
         } else if (found.state === "published") {
-          show("Checks passed. It will be in the store in a minute.", found.url, "Your submission");
+          show("Checks passed. Live in a minute.", found.url, "Your submission");
         } else {
-          show("GitHub has your submission. The checks are running.", found.url, "Your submission");
+          show("Checks are running.", found.url, "Your submission");
         }
       }, function () {});
     };
@@ -832,7 +906,7 @@
       clearInterval(feedTimer);
       clearInterval(issueTimer);
       if (done) return;
-      show("Not live yet. Your submission on GitHub says where it stands.", search, "Find your submission");
+      show("Not live yet.", search, "Find your submission");
     }, Math.max(0, 12 * 60000 - (started - job.since)));
   }
 
@@ -862,16 +936,15 @@
     status.querySelector("[data-copy]").setAttribute("data-copy", how.clipboard || "");
     show(
       how.mode === "paste"
-        ? "GitHub opened in a new tab. Your submission is on the clipboard."
-        : "GitHub opened in a new tab with everything filled in. Sign in if it asks, then press Create.",
+        ? "GitHub is open. Your submission is on the clipboard."
+        : "GitHub is open. Press Create there.",
       how.url,
       "Open GitHub again",
     );
-    status.scrollIntoView({ block: "center", behavior: "smooth" });
+    status.scrollIntoView({ block: "nearest", behavior: "smooth" });
     watch(job);
   });
 
-  setKind("skill");
   render();
   try {
     var saved = JSON.parse(sessionStorage.getItem(WATCH_KEY) || "null");

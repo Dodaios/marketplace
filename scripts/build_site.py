@@ -921,13 +921,13 @@ there.</p>
 <div class="drop" data-drop>
 {SVG_UPLOAD}
 <strong>Drop a file or folder</strong>
-<span class="drop__hint">A skill, a plugin or an agent</span>
+<span class="drop__hint">A skill, a plugin, an agent, or a look's zip</span>
 <span class="drop__actions">
 <button class="button button--quiet" type="button" data-open="file">Choose file</button>
 <button class="button button--quiet" type="button" data-open="folder">Choose folder</button>
 </span>
 <input type="file" data-pick="file" multiple hidden
- accept=".md,.markdown,.txt,.json,text/markdown,application/json">
+ accept=".md,.markdown,.txt,.json,.zip,text/markdown,application/json,application/zip">
 <input type="file" data-pick="folder" multiple webkitdirectory hidden>
 </div>
 
@@ -951,6 +951,15 @@ there.</p>
 <span class="field__label">Description</span>
 <textarea name="description" rows="3" maxlength="500"></textarea>
 <span class="problem" data-problem="description" role="alert" hidden></span>
+</label>
+
+<label class="field" data-row-archive hidden>
+<span class="field__label">Release link</span>
+<input name="archive_url" type="url" autocomplete="off" spellcheck="false"
+ placeholder="https://github.com/you/repo/releases/download/v1.0.0/look.zip">
+<span class="field__hint">Attach this same zip to a release on your GitHub repository, then copy
+the file's link.</span>
+<span class="problem" data-problem="archive" role="alert" hidden></span>
 </label>
 
 <details class="more" data-more>
@@ -983,8 +992,8 @@ there.</p>
     return layout(
         title=f"Publish to the Marketplace — {PRODUCT}",
         description=(
-            f"Publish a plugin, a skill or an agent to the {PRODUCT} marketplace: drop your "
-            "file, press Publish, confirm on GitHub."
+            f"Publish a plugin, a skill, an agent or a look to the {PRODUCT} marketplace: drop "
+            "your file, press Publish, confirm on GitHub."
         ),
         path="publish/",
         depth=1,
